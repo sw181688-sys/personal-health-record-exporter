@@ -15,25 +15,35 @@ durable local copy of notes, labs, meds, problems, allergies, and visit history
 
 ## Current state
 
-Code is **written and tested**; nothing has been run against real data yet.
+Code is **written, tested, and validated against Epic's sandbox end to end**.
+It has not yet been run against Stanford — i.e. never against real chart data.
 
 - `epic_export.py` — the CLI. Subcommands: `find-endpoint`, `login`, `pull`,
   `render`, `all`.
 - `mock_epic.py` — a local fake Epic server (SMART discovery, real PKCE
   verification, CapabilityStatement, paginated bundles, `Binary`-backed note).
-- `test_flow.py` — end-to-end test against the mock. **32 checks, all passing.**
-  Run with `python3 test_flow.py`. Keep it green.
+- `test_flow.py` — end-to-end test against the mock. **47 checks, all passing.**
+  Run with `python test_flow.py`. Keep it green.
 - `index.html` / `README.md` / `PUBLISHING.md` — the public documentation page
   required by Epic's registration form, and how to publish it.
 
+### Done
+
+1. ~~Register the app at <https://fhir.epic.com>~~ — registered, **Save & Ready
+   for Sandbox**. Client ids live in the Epic portal, not in this repo: they
+   aren't secrets for a public PKCE client, but this repo is public and there
+   is no reason to hand out an app identity.
+2. ~~Publish the docs page~~ — live at
+   <https://sw181688-sys.github.io/personal-health-record-exporter/>, terms at
+   `/terms`. Both pasted into the Epic form.
+3. ~~Validate against Epic's sandbox~~ — full `all` run against test patient
+   `fhircamila`, pulling 17 resource types, 4 notes, and 254 vitals.
+
 ### What's left
 
-1. Register the app at <https://fhir.epic.com> (see `SETUP.md` step 1).
-2. Publish the docs page to GitHub Pages (see `PUBLISHING.md`), then paste that
-   URL into Epic's **Public Documentation URL** field.
-3. Run against Epic's sandbox to validate registration:
-   test patient `fhircamila` / `epicepic1`.
-4. Then run against Stanford for real.
+1. Mark the app **Ready for Production** in Epic's portal; the production
+   client id takes about an hour to propagate.
+2. Run against Stanford for real.
 
 ## Hard-won findings — do not re-derive these
 
@@ -96,7 +106,12 @@ it, notes come back as empty references.
 - The tool must never write to the medical record and must never transmit data
   anywhere except between the user's machine and their provider. No telemetry,
   no analytics, no third-party calls.
-- Tokens: `0600`, stored under `<out>/.auth/`, never logged.
+- Tokens are stored under `<out>/.auth/`, restricted to the current user, and
+  never logged. Use `lock_down()`, not `os.chmod` — chmod on Windows only
+  toggles the read-only bit and does **not** restrict who can read the file.
+- The access token must never leave the provider's origin. Server-supplied
+  URLs (pagination `next`, `Binary` attachments) go through `same_origin()`
+  first; the token is a session header and would ride along.
 - `.gitignore` excludes all record output and credentials. **Verify
   `git status --short` before any commit** — a public commit containing real
   chart data is very hard to undo.
@@ -104,17 +119,35 @@ it, notes come back as empty references.
 ## Testing
 
 ```bash
-python3 test_flow.py
+python test_flow.py
 ```
+
+On Windows use `python`, not `python3` — the latter is the Microsoft Store
+stub and reports "Python was not found" even with Python installed.
 
 Runs the whole flow against `mock_epic.py`: PKCE round trip (including
 rejection of a bad verifier), token file permissions, capability filtering,
 bundle pagination, `Binary` note retrieval and HTML stripping, token refresh,
-the no-refresh-token expiry path, and rendering.
+the no-refresh-token expiry path, rendering, cross-origin token containment,
+and HTML escaping.
 
-No network access is needed — the mock is local. Real Epic endpoints were
-reachable for research but the sandbox was never exercised end to end, so
-**step 3 above is genuinely unverified**; expect to debug the first real run.
+No network access is needed — the mock is local.
+
+**Keep the mock at least as messy as production.** Every bug that reached a
+live server got there because `mock_epic.py` was tidier than Epic: clean
+bundles hid the `OperationOutcome` entries, distinct short ids hid the note
+filename collision, a `valueString` blood pressure hid component parsing.
+When real Epic surprises you, put the surprise in the mock.
+
+### CI
+
+`.github/workflows/test.yml` runs the suite on **ubuntu + windows × Python
+3.11/3.12/3.13**. Both platforms are required, not decorative: `lock_down()`
+and the test's permission check each have a Windows branch and a POSIX
+branch, and any one machine only ever exercises one of them.
+
+The workflow must never touch a real health system — no client id, no token,
+no live pull. Actions logs on a public repo are public.
 
 ## Notes on the owner's situation
 
