@@ -634,6 +634,13 @@ def _flag(o: dict) -> str:
     return ""
 
 
+def _affects_phrase(affects: list[str], limit: int = 5) -> str:
+    """Name what a notice touched without printing seventeen FHIR labels."""
+    if len(affects) <= limit:
+        return ", ".join(affects)
+    return ", ".join(affects[:limit]) + f", and {len(affects) - limit} more"
+
+
 def cmd_render(args: argparse.Namespace) -> None:
     out = Path(args.out)
     raw = out / "raw"
@@ -755,11 +762,17 @@ def cmd_render(args: argparse.Namespace) -> None:
 
     # If the server said it held something back, that belongs in the document
     # itself — someone reading this a year from now needs to know it may not
-    # be the whole chart.
-    section("About this export", (
-        f"- {n['message']}  \n  _(affects: {', '.join(n['affects'])})_"
-        for n in manifest.get("server_notices", [])
-    ))
+    # be the whole chart. One line per notice: a continuation line would fall
+    # out of the <ul> in _md_to_html.
+    notices = manifest.get("server_notices", [])
+    if notices:
+        section("About this export", [
+            "These notices came from the server during the export. The full "
+            "list of affected searches is in `manifest.json`.",
+        ] + [
+            f"- {n['message']} _(affects: {_affects_phrase(n['affects'])})_"
+            for n in notices
+        ])
 
     md_text = "\n".join(md)
     (out / "record.md").write_text(md_text, encoding="utf-8")
@@ -804,7 +817,9 @@ def _md_to_html(md: str) -> str:
         s = (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
         s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
         s = re.sub(r"`(.+?)`", r"<code>\1</code>", s)
-        s = re.sub(r"_(.+?)_", r"<em>\1</em>", s)
+        # Underscores must not emphasize mid-word, or FHIR labels like
+        # Observation_laboratory pair up their underscores and shred the line.
+        s = re.sub(r"(?<![A-Za-z0-9])_(.+?)_(?![A-Za-z0-9])", r"<em>\1</em>", s)
         return s
 
     for ln in lines:
@@ -839,6 +854,16 @@ def _md_to_html(md: str) -> str:
 # --------------------------------------------------------------------------
 
 def main() -> None:
+    # A Windows console defaults to cp1252 with strict encoding on stdout, so
+    # printing a clinician's name, an org name from Epic's directory, or a
+    # server message containing anything outside that codepage kills the run.
+    # Nothing here is worth crashing an export over.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):  # not a reconfigurable stream
+            pass
+
     p = argparse.ArgumentParser(
         description="Export your medical record from an Epic MyChart FHIR API.")
     p.add_argument("--out", default="./record", help="output directory (default ./record)")

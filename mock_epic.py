@@ -54,6 +54,10 @@ DATA = {
          "code": {"text": "Type 2 diabetes mellitus"}, "onsetDateTime": "2019-03-04"},
         {"resourceType": "Condition", "id": "c2",
          "code": {"text": "Essential hypertension"}, "onsetDateTime": "2021-11-20"},
+        # Real diagnoses carry characters a Windows cp1252 console cannot
+        # encode. Keep one here so the export can't regress to crashing on them.
+        {"resourceType": "Condition", "id": "c3",
+         "code": {"text": "β-thalassemia minor"}, "onsetDateTime": "2018-02-11"},
     ],
     ("AllergyIntolerance", ""): [
         {"resourceType": "AllergyIntolerance", "id": "a1",

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -149,9 +150,27 @@ def main() -> int:
     check("allergy present", "Penicillin" in md)
     check("note indexed", "Progress Note" in md)
     check("html escaping sane", "<script>" not in html)
+    check("non-cp1252 clinical text survives to markdown",
+          "β-thalassemia minor" in md)
+    check("non-cp1252 clinical text survives to HTML",
+          "β-thalassemia minor" in html)
     check("no stray '?' rows from outcome entries", "- ?" not in md)
     check("completeness caveat lands in the document",
           "About this export" in md and "will not be returned" in md)
+    # The caveat has to survive into the HTML too — checking only the markdown
+    # missed a broken <ul> and mangled emphasis the first time around.
+    notice_html = html[html.find("About this export"):]
+    check("caveat present in HTML", "will not be returned" in notice_html)
+    check("notice list not fragmented into one <ul> each",
+          notice_html.count("<ul>") == 1, f"{notice_html.count('<ul>')} <ul>")
+    # The mangling signature is a tag spliced into the middle of a word, e.g.
+    # "CarePlan</em>assessplan". Assert the shape, not one specific label,
+    # since the affects list is truncated for readability.
+    check("underscored FHIR labels not mangled by emphasis",
+          "Condition_problemlistitem" in notice_html
+          and not re.search(r"[A-Za-z0-9]</?em>[A-Za-z0-9]", notice_html))
+    check("no unclosed emphasis left in HTML", "_<" not in notice_html
+          and not re.search(r"_\s*</p>", notice_html))
 
     print("\n6. no-refresh-token default path")
     import copy
