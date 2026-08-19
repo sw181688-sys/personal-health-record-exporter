@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms and Conditions — Personal Health Record Exporter</title>
+<meta name="description" content="Terms and Conditions for the Personal Health Record Exporter, an open-source, read-only, local-only tool for downloading your own medical record.">
+<style>
+  :root{
+    --bg:#ffffff; --fg:#16181d; --muted:#5c6370; --rule:#e6e8ec;
+    --accent:#1f6feb; --card:#f7f8fa;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0f1115;--fg:#e6e8ec;--muted:#9aa3b2;--rule:#242833;
+          --accent:#6ea8fe;--card:#161a21;}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:50rem;margin:0 auto;padding:4rem 1.5rem 6rem}
+  header{border-bottom:1px solid var(--rule);padding-bottom:2rem;margin-bottom:2.5rem}
+  h1{font-size:1.9rem;line-height:1.2;margin:0 0 .6rem;letter-spacing:-.02em}
+  .tag{font-size:1.05rem;color:var(--muted);margin:0}
+  p{margin:0 0 1rem}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.87em;background:var(--card);
+    padding:.12rem .38rem;border-radius:4px}
+  footer{margin-top:3rem;padding-top:1.8rem;border-top:1px solid var(--rule);
+    font-size:.83rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Terms and Conditions</h1>
+  <p class="tag">Personal Health Record Exporter</p>
+</header>
+
+<p>This is free, open-source software licensed under the
+<a href="https://github.com/sw181688-sys/personal-health-record-exporter/blob/main/LICENSE">MIT License</a>,
+provided <strong>as-is, with no warranty of any kind</strong>. There is no
+company, account, or service behind this tool — running it does not create a
+contract or relationship with anyone. It only reformats data your provider
+already gives you access to; it does not provide medical advice and is not a
+medical device.</p>
+
+<p>You are solely responsible for how you use the exported record, including
+keeping the output folder and its <code>.auth</code> token secure. Always
+confirm anything clinically important with your care team rather than relying
+on this tool's summarization in isolation.</p>
+
+<p>The maintainer provides no guarantee of uptime, accuracy, or support, and to
+the maximum extent permitted by law is not liable for any damages arising from
+use of this software. Support requests can be opened as
+<a href="https://github.com/sw181688-sys/personal-health-record-exporter/issues">GitHub issues</a>
+but response time is not guaranteed.</p>
+
+<footer>
+  <p><a href="../">&larr; Back to project overview</a></p>
+</footer>
+
+</div>
+</body>
+</html>
