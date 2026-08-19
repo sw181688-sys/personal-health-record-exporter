@@ -418,11 +418,34 @@ def load_tokens(out: Path) -> dict:
 # pulling
 # --------------------------------------------------------------------------
 
+def outcome_issues(oo: dict) -> list[str]:
+    """Readable issue strings from an OperationOutcome."""
+    msgs = []
+    for iss in oo.get("issue", []) or []:
+        text = ((iss.get("details", {}) or {}).get("text")
+                or iss.get("diagnostics")
+                or iss.get("code", ""))
+        if not text:
+            continue
+        sev = iss.get("severity", "")
+        msgs.append(f"{sev}: {text}" if sev else text)
+    return msgs
+
+
 def fetch_all(session: requests.Session, base: str, rtype: str,
-              params: dict[str, str]) -> list[dict]:
-    """Search a resource type and follow Bundle pagination to the end."""
+              params: dict[str, str]) -> tuple[list[dict], list[str]]:
+    """Search a resource type and follow Bundle pagination to the end.
+
+    Returns (resources, warnings). A search Bundle can carry OperationOutcome
+    entries alongside the matches — Epic uses them to say things like "results
+    of this sub-type will not be returned". Those describe the search, they
+    aren't clinical records, so they're pulled out here instead of being saved
+    and rendered as if they were part of the chart. The warnings are worth
+    keeping: they're how the server tells you the export is incomplete.
+    """
     url = base.rstrip("/") + f"/{rtype}"
     resources: list[dict] = []
+    warnings: list[str] = []
     first = True
     while url:
         r = session.get(url, params=params if first else None, timeout=120)
@@ -430,22 +453,30 @@ def fetch_all(session: requests.Session, base: str, rtype: str,
         if r.status_code in (401, 403):
             raise PermissionError(f"{rtype}: {r.status_code}")
         if r.status_code == 404:
-            return resources
+            return resources, warnings
         if r.status_code >= 400:
             log(f"{rtype}: HTTP {r.status_code} — {r.text[:200]}")
-            return resources
+            return resources, warnings
         bundle = r.json()
         if bundle.get("resourceType") == rtype:  # a plain read, not a search
-            return [bundle]
+            return [bundle], warnings
+        if bundle.get("resourceType") == "OperationOutcome":
+            return resources, warnings + outcome_issues(bundle)
         for e in bundle.get("entry", []) or []:
-            if e.get("resource"):
-                resources.append(e["resource"])
+            res = e.get("resource")
+            if not res:
+                continue
+            if (res.get("resourceType") == "OperationOutcome"
+                    or (e.get("search", {}) or {}).get("mode") == "outcome"):
+                warnings.extend(outcome_issues(res))
+                continue
+            resources.append(res)
         url = None
         for link in bundle.get("link", []) or []:
             if link.get("relation") == "next":
                 url = link.get("url")
         params = {}
-    return resources
+    return resources, warnings
 
 
 def fetch_note_text(session: requests.Session, base: str, att: dict) -> str | None:
@@ -502,6 +533,9 @@ def cmd_pull(args: argparse.Namespace) -> None:
 
     raw = out / "raw"
     collected: dict[str, list[dict]] = {}
+    # message -> which searches reported it (Epic repeats the same notice on
+    # every search, so dedupe rather than printing it twenty times).
+    notices: dict[str, list[str]] = {}
 
     for rtype, extra in WANTED:
         if supported and rtype not in supported:
@@ -514,10 +548,12 @@ def cmd_pull(args: argparse.Namespace) -> None:
             params["patient"] = patient_id
         label = rtype + ("_" + extra.get("category", "").replace("-", "") if extra else "")
         try:
-            found = fetch_all(s, base, rtype, params)
+            found, warns = fetch_all(s, base, rtype, params)
         except PermissionError as e:
             log(f"{e} — your app's scopes don't cover this")
             continue
+        for w in warns:
+            notices.setdefault(w, []).append(label)
         if not found:
             log(f"{label}: none")
             continue
@@ -550,13 +586,27 @@ def cmd_pull(args: argparse.Namespace) -> None:
         save_json(out / "notes_index.json", note_index)
         log(f"notes: wrote {len(note_index)} note bodies to {notes_dir}")
 
+    notice_list = [{"message": m, "affects": sorted(set(v))}
+                   for m, v in notices.items()]
+
     save_json(out / "manifest.json", {
         "pulled_at": dt.datetime.now().isoformat(timespec="seconds"),
         "fhir_base": base,
         "patient_id": patient_id,
         "counts": {k: len(v) for k, v in collected.items()},
         "notes": len(note_index),
+        "server_notices": notice_list,
     })
+
+    # The server telling you it withheld something matters more than any
+    # count above it, so say it last, where it won't scroll away.
+    if notice_list:
+        log("")
+        log(f"{len(notice_list)} notice(s) from the server about this export:")
+        for n in notice_list:
+            log(f"  - {n['message']}")
+            log(f"    affects: {', '.join(n['affects'])}")
+
     print(f"\nDone. Raw FHIR in {raw}, note text in {notes_dir}")
 
 
@@ -592,7 +642,13 @@ def cmd_render(args: argparse.Namespace) -> None:
 
     def load(stem: str) -> list[dict]:
         p = raw / f"{stem}.json"
-        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+        if not p.exists():
+            return []
+        data = json.loads(p.read_text(encoding="utf-8"))
+        # Belt and braces: pull now strips these, but data pulled by an older
+        # version still has OperationOutcomes mixed in, and they render as
+        # meaningless "?" rows.
+        return [r for r in data if r.get("resourceType") != "OperationOutcome"]
 
     patient = (load("Patient") or [{}])[0]
     name = ""
@@ -610,8 +666,12 @@ def cmd_render(args: argparse.Namespace) -> None:
     immunizations = load("Immunization")
     notes = json.loads((out / "notes_index.json").read_text(encoding="utf-8")) if (out / "notes_index.json").exists() else []
 
+    manifest_path = out / "manifest.json"
+    manifest = (json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_path.exists() else {})
+
     md: list[str] = [f"# Medical record — {name or 'patient'}", ""]
-    md.append(f"_Exported {dt.datetime.now():%B %d, %Y} from {json.loads((out/'manifest.json').read_text(encoding='utf-8')).get('fhir_base','')}_")
+    md.append(f"_Exported {dt.datetime.now():%B %d, %Y} from {manifest.get('fhir_base','')}_")
     md.append("")
 
     def section(title: str, rows: Iterable[str]) -> None:
@@ -691,6 +751,14 @@ def cmd_render(args: argparse.Namespace) -> None:
         f"_({r.get('status','')})_"
         for r in sorted(reports,
                         key=lambda x: x.get("effectiveDateTime", ""), reverse=True)
+    ))
+
+    # If the server said it held something back, that belongs in the document
+    # itself — someone reading this a year from now needs to know it may not
+    # be the whole chart.
+    section("About this export", (
+        f"- {n['message']}  \n  _(affects: {', '.join(n['affects'])})_"
+        for n in manifest.get("server_notices", [])
     ))
 
     md_text = "\n".join(md)

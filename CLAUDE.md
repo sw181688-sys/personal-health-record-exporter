@@ -21,7 +21,7 @@ Code is **written and tested**; nothing has been run against real data yet.
   `render`, `all`.
 - `mock_epic.py` — a local fake Epic server (SMART discovery, real PKCE
   verification, CapabilityStatement, paginated bundles, `Binary`-backed note).
-- `test_flow.py` — end-to-end test against the mock. **24 checks, all passing.**
+- `test_flow.py` — end-to-end test against the mock. **32 checks, all passing.**
   Run with `python3 test_flow.py`. Keep it green.
 - `index.html` / `README.md` / `PUBLISHING.md` — the public documentation page
   required by Epic's registration form, and how to publish it.
@@ -73,6 +73,16 @@ patient messaging through the patient API — it's an application feature, not
 part of the Cures Act certified data set. This was an explicit ask from the
 owner, so don't quietly try to add it; it can't be done this way. Same for
 radiology DICOM images and billing statements.
+
+**Epic puts an `OperationOutcome` in every search bundle.** It rides along as
+an entry with `search.mode: "outcome"`, so naive "collect every entry" code
+counts it as a clinical record — every resource count comes out one too high and
+it renders as a meaningless `?` row. `fetch_all` separates them out. Do not just
+drop them, though: two of the four Epic returns say *"Results of this sub-type
+will not be returned"*, which is the server telling you the export is
+**incomplete**. They're deduped into `manifest.json` as `server_notices` and
+rendered as an "About this export" section. The mock now emits them too — it
+didn't, which is exactly why this reached a live server undetected.
 
 **`Binary` must be in the app's registered API list.** Clinical note narrative
 lives in `DocumentReference` attachments that resolve through `Binary`. Without

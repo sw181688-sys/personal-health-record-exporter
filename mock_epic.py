@@ -99,6 +99,30 @@ DATA = {
     ],
 }
 
+# Epic attaches an OperationOutcome to every search bundle, flagged
+# search.mode="outcome". These are the real texts a live Epic returns. They are
+# diagnostics about the search, not chart content — and the first one means data
+# was actually withheld, so the client must not render them as records but must
+# not silently drop them either.
+SEARCH_OUTCOME = {
+    "search": {"mode": "outcome"},
+    "resource": {
+        "resourceType": "OperationOutcome",
+        "issue": [
+            {"severity": "warning", "code": "suppressed",
+             "details": {"text": "The authenticated client's search request "
+                                 "applies to a sub-resource that the client is "
+                                 "not authorized for. Results of this sub-type "
+                                 "will not be returned."}},
+            {"severity": "warning", "code": "processing",
+             "details": {"text": "This response includes information available "
+                                 "to the authorized user at the time of the "
+                                 "request. It may not contain the entire record "
+                                 "available in the system."}},
+        ],
+    },
+}
+
 NOTE_HTML = """<div><p><b>Subjective:</b> Patient reports improved energy since the
 last visit. Adherent to metformin. Denies hypoglycemic episodes.</p>
 <p><b>Assessment:</b> Type 2 diabetes, improving. A1c down from 8.1 to 7.4.</p>
@@ -176,11 +200,13 @@ class H(BaseHTTPRequestHandler):
                 links = [{"relation": "next",
                           "url": f"{BASE}/{rtype}?" + urllib.parse.urlencode(nxt)}]
             return self._send({"resourceType": "Bundle", "type": "searchset",
-                               "entry": [{"resource": r} for r in chunk],
+                               "entry": [{"resource": r} for r in chunk]
+                                        + [SEARCH_OUTCOME],
                                "link": links})
 
         return self._send({"resourceType": "Bundle", "type": "searchset",
-                           "entry": [{"resource": r} for r in items]})
+                           "entry": [{"resource": r} for r in items]
+                                    + [SEARCH_OUTCOME]})
 
     def do_POST(self):  # noqa: N802
         u = urllib.parse.urlparse(self.path)

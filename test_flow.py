@@ -110,6 +110,27 @@ def main() -> int:
     check("note HTML stripped to text", "Assessment:" in body and "<p>" not in body)
     check("note content intact", "A1c down from 8.1 to 7.4" in body)
 
+    # A real Epic mixes an OperationOutcome into every search bundle. Treating
+    # those as clinical records inflates every count by one and renders them as
+    # meaningless "?" rows; dropping them silently hides the server telling you
+    # part of the chart was withheld. Both halves are checked here.
+    stray = {p.name: [r.get("resourceType") for r in
+                      json.loads(p.read_text(encoding="utf-8"))]
+             for p in raw.glob("*.json")}
+    polluted = {k: v for k, v in stray.items() if "OperationOutcome" in v}
+    check("OperationOutcome kept out of saved resources", not polluted,
+          ", ".join(polluted) or "none")
+    check("counts not inflated by outcome entries",
+          man["counts"].get("Patient") == 1, str(man["counts"].get("Patient")))
+    notices = man.get("server_notices", [])
+    check("server notices captured", len(notices) == 2, f"got {len(notices)}")
+    check("suppression warning surfaced",
+          any("will not be returned" in n["message"] for n in notices))
+    check("notices deduped across resource types and pages",
+          all(len(n["affects"]) == len(set(n["affects"])) for n in notices))
+    check("notices record which searches they affect",
+          any("Observation_laboratory" in n["affects"] for n in notices))
+
     print("\n4. token refresh path")
     t = json.loads(tf.read_text(encoding="utf-8")); t["_obtained_at"] = 0; t["expires_in"] = 1
     tf.write_text(json.dumps(t), encoding="utf-8")
@@ -128,6 +149,9 @@ def main() -> int:
     check("allergy present", "Penicillin" in md)
     check("note indexed", "Progress Note" in md)
     check("html escaping sane", "<script>" not in html)
+    check("no stray '?' rows from outcome entries", "- ?" not in md)
+    check("completeness caveat lands in the document",
+          "About this export" in md and "will not be returned" in md)
 
     print("\n6. no-refresh-token default path")
     import copy
