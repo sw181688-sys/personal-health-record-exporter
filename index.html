@@ -142,7 +142,7 @@ of health data US patients have a legal right to access electronically.</p>
   notes/        your clinical notes as plain text
   record.html   a readable, printable version of the whole record
   record.md     the same in Markdown
-  .auth/        your access token (file permissions 0600)</code></pre>
+  .auth/        your access token (restricted to your user account)</code></pre>
 <p>Treat that folder the way you'd treat a printout of your chart. The
 <code>.auth</code> folder holds a credential that can read your record until it
 expires; the project's <code>.gitignore</code> keeps all of it out of version
@@ -163,7 +163,12 @@ your computer also destroys the local copy of the token.</p>
     request forgery.</li>
   <li>The OAuth redirect is served over TLS on <code>localhost</code> only and is
     never exposed to the network.</li>
-  <li>Tokens are stored with <code>0600</code> permissions and are never logged.</li>
+  <li>Tokens are stored with filesystem permissions restricted to the account
+    that ran the export — <code>0600</code> on macOS and Linux, and an
+    equivalent ACL on Windows — and are never logged.</li>
+  <li>The access token is only ever sent to the health system it was issued
+    for. URLs supplied by the server are checked against that origin first,
+    so a token cannot be forwarded elsewhere.</li>
 </ul>
 
 <h2>Terms and Conditions</h2>

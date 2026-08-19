@@ -21,23 +21,36 @@ PATIENT_ID = "eTestPatient123"
 
 STATE: dict = {}  # holds the pending auth request
 
+#         date          name              value  unit       flag  ref range
 LABS = [
-    ("2026-07-14", "Hemoglobin A1c", 7.4, "%", "H"),
-    ("2026-07-14", "Creatinine", 0.9, "mg/dL", ""),
-    ("2026-01-09", "Hemoglobin A1c", 8.1, "%", "H"),
-    ("2025-06-02", "Potassium", 3.2, "mmol/L", "L"),
+    ("2026-07-14", "Hemoglobin A1c", 7.4, "%", "H", (4.0, 5.6)),
+    ("2026-07-14", "Creatinine", 0.9, "mg/dL", "", (0.6, 1.1)),
+    ("2026-01-09", "Hemoglobin A1c", 8.1, "%", "H", (4.0, 5.6)),
+    ("2025-06-02", "Potassium", 3.2, "mmol/L", "L", (3.5, 5.1)),
+    # Ordered but never resulted. Dropping this row entirely made it look as
+    # though the test was never done.
+    ("2025-06-02", "Vitamin D, 25-Hydroxy", None, "", "", None),
 ]
 
 
-def obs(i, date, name, val, unit, flag):
+def obs(i, date, name, val, unit, flag, rng=None):
     r = {
         "resourceType": "Observation", "id": f"obs{i}",
         "status": "final",
         "category": [{"coding": [{"code": "laboratory"}]}],
-        "code": {"text": name},
-        "effectiveDateTime": f"{date}T10:00:00Z",
-        "valueQuantity": {"value": val, "unit": unit},
+        # No `text` here on purpose: Epic frequently sends only coding.display,
+        # and reading `.text` alone renders a bare "?".
+        "code": {"coding": [{"system": "http://loinc.org", "display": name}]},
+        # 02:00 UTC is the previous calendar day across the Americas.
+        "effectiveDateTime": f"{date}T02:00:00Z",
     }
+    if val is None:
+        r["dataAbsentReason"] = {"coding": [{"display": "Not performed"}]}
+    else:
+        r["valueQuantity"] = {"value": val, "unit": unit}
+    if rng:
+        r["referenceRange"] = [{"low": {"value": rng[0], "unit": unit},
+                                "high": {"value": rng[1], "unit": unit}}]
     if flag:
         r["interpretation"] = [{"coding": [{"code": flag}], "text": flag}]
     return r
@@ -125,6 +138,40 @@ DATA = {
         {"resourceType": "DiagnosticReport", "id": "d1", "status": "final",
          "code": {"text": "Comprehensive metabolic panel"},
          "effectiveDateTime": "2026-07-14T10:00:00Z"},
+    ],
+    # Everything below was pulled and saved by the exporter but never rendered.
+    # The mock never served any of it, which is why nothing caught that.
+    ("Condition", "encounter-diagnosis"): [
+        {"resourceType": "Condition", "id": "ed1", "recordedDate": "2026-07-14",
+         "code": {"coding": [{"system": "http://snomed.info/sct",
+                              "display": "Stomach ache (finding)"}]}},
+    ],
+    ("Procedure", ""): [
+        {"resourceType": "Procedure", "id": "pr1", "status": "completed",
+         "code": {"coding": [{"display": "HC TRANSTHORACIC ECHO"}]},
+         "performedDateTime": "2026-07-02T18:30:00Z"},
+    ],
+    ("Observation", "social-history"): [
+        {"resourceType": "Observation", "id": "sh1", "status": "final",
+         "category": [{"coding": [{"code": "social-history"}]}],
+         "code": {"coding": [{"display": "Tobacco smoking status"}]},
+         "effectivePeriod": {"end": "2026-07-14"},
+         "valueCodeableConcept": {"text": "Never smoker"}},
+    ],
+    ("CareTeam", ""): [
+        {"resourceType": "CareTeam", "id": "ct1", "status": "active",
+         "participant": [{"member": {"display": "Dr. A. Chen"},
+                          "role": [{"text": "Primary Care Provider"}]}]},
+    ],
+    ("CarePlan", "assess-plan"): [
+        {"resourceType": "CarePlan", "id": "cp1", "status": "active",
+         "category": [{"text": "Assessment and Plan of Treatment"}],
+         "addresses": [{"display": "Type 2 diabetes mellitus"}]},
+    ],
+    ("Goal", ""): [
+        {"resourceType": "Goal", "id": "g1", "lifecycleStatus": "active",
+         "startDate": "2026-03-01",
+         "description": {"text": "Walk 30 minutes daily"}},
     ],
 }
 

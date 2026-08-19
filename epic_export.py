@@ -641,7 +641,9 @@ def cmd_pull(args: argparse.Namespace) -> None:
         for c in dr.get("content", []) or []:
             att = c.get("attachment", {})
             text = fetch_note_text(s, base, att)
-            if not text or len(text) < 20:
+            # Was "< 20 chars", which silently discarded real short notes
+            # ("No acute distress." is 18). Only skip genuinely empty bodies.
+            if not text or not text.strip():
                 continue
             slug = re.sub(r"[^a-zA-Z0-9]+", "-", f"{when}-{title}").strip("-").lower()[:80]
             # The id must not be truncated. Epic's DocumentReference ids share
@@ -656,12 +658,20 @@ def cmd_pull(args: argparse.Namespace) -> None:
                                "chars": len(text), "source_id": dr.get("id", "")})
             break
     if note_index:
+        indexed = {n["file"] for n in note_index}
+        # Filenames are derived from the note id, so a re-pull rewrites the
+        # same names. Anything else left in here is from an older run and no
+        # longer part of the record — leaving it makes the folder look like it
+        # holds more notes than the index admits to.
+        for stale in notes_dir.glob("*.txt"):
+            if stale.name not in indexed:
+                stale.unlink()
+                log(f"removed stale note from an earlier run: {stale.name}")
         # The index must describe what is actually on disk.
         on_disk = {p.name for p in notes_dir.glob("*.txt")}
-        indexed = {n["file"] for n in note_index}
-        if len(indexed) != len(note_index) or not indexed <= on_disk:
+        if len(indexed) != len(note_index) or indexed != on_disk:
             log(f"WARNING: {len(note_index)} notes indexed but "
-                f"{len(indexed)} distinct files — notes may have been lost")
+                f"{len(on_disk)} files on disk — notes may have been lost")
         save_json(out / "notes_index.json", note_index)
         log(f"notes: wrote {len(note_index)} note bodies to {notes_dir}")
 
@@ -726,6 +736,69 @@ def _obs_value(o: dict) -> str:
     return ""
 
 
+def _concept_text(cc: Any) -> str:
+    """Readable label for a CodeableConcept.
+
+    Epic often omits `text` and only sends `coding[].display` — encounter
+    diagnoses are like this — so reading `.text` alone renders a bare "?".
+    """
+    if not isinstance(cc, dict):
+        return ""
+    if cc.get("text"):
+        return str(cc["text"])
+    for c in cc.get("coding", []) or []:
+        if c.get("display"):
+            return str(c["display"])
+    return ""
+
+
+def _local_date(ts: str) -> str:
+    """Date as the patient lived it, not as UTC recorded it.
+
+    FHIR instants are usually UTC: a reading at 2026-08-19T02:27Z happened on
+    the 18th in California, and slicing the first ten characters dates it a
+    day late. Date-only values (onsetDateTime "2005-09-20") carry no zone and
+    must be left exactly as they are.
+    """
+    if not ts:
+        return ""
+    if len(ts) <= 10:
+        return ts[:10]
+    try:
+        d = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ts[:10]
+    if d.tzinfo is None:  # no zone means no basis for shifting it
+        return ts[:10]
+    return d.astimezone().date().isoformat()
+
+
+def _obs_date(o: dict) -> str:
+    """Observations date themselves several ways; social history uses a period."""
+    return _local_date(
+        o.get("effectiveDateTime")
+        or (o.get("effectivePeriod", {}) or {}).get("start")
+        or (o.get("effectivePeriod", {}) or {}).get("end")
+        or o.get("issued", "")
+    )
+
+
+def _ref_range(o: dict) -> str:
+    """A lab value without its range is hard for a patient to act on."""
+    for r in o.get("referenceRange", []) or []:
+        if r.get("text"):
+            return str(r["text"])
+        lo, hi = r.get("low") or {}, r.get("high") or {}
+        unit = lo.get("unit") or hi.get("unit") or ""
+        if lo.get("value") is not None and hi.get("value") is not None:
+            return f"{lo['value']}–{hi['value']} {unit}".strip()
+        if lo.get("value") is not None:
+            return f"≥{lo['value']} {unit}".strip()
+        if hi.get("value") is not None:
+            return f"≤{hi['value']} {unit}".strip()
+    return ""
+
+
 def _flag(o: dict) -> str:
     for i in o.get("interpretation", []) or []:
         t = i.get("text") or (i.get("coding", [{}])[0].get("code", ""))
@@ -777,6 +850,14 @@ def cmd_render(args: argparse.Namespace) -> None:
     reports = load("DiagnosticReport_LAB") + load("DiagnosticReport_RAD")
     encounters = load("Encounter")
     immunizations = load("Immunization")
+    # These were pulled and saved but never rendered — 22 records invisible in
+    # the sandbox alone, two of which index.html promises patients by name.
+    visit_dx = load("Condition_encounterdiagnosis")
+    procedures = load("Procedure")
+    social = load("Observation_socialhistory")
+    care_team = load("CareTeam")
+    care_plans = load("CarePlan_assessplan")
+    goals = load("Goal")
     notes = json.loads((out / "notes_index.json").read_text(encoding="utf-8")) if (out / "notes_index.json").exists() else []
 
     manifest_path = out / "manifest.json"
@@ -797,13 +878,14 @@ def cmd_render(args: argparse.Namespace) -> None:
         md.append("")
 
     section("Active problems", (
-        f"- {c.get('code',{}).get('text','?')}"
-        + (f" — onset {c['onsetDateTime'][:10]}" if c.get("onsetDateTime") else "")
+        f"- {_concept_text(c.get('code')) or '?'}"
+        + (f" — onset {_local_date(c['onsetDateTime'])}"
+           if c.get("onsetDateTime") else "")
         for c in problems
     ))
 
     section("Allergies", (
-        f"- **{a.get('code',{}).get('text','?')}** — "
+        f"- **{_concept_text(a.get('code')) or '?'}** — "
         + ", ".join(
             r.get("text", "") or ", ".join(
                 m.get("manifestation", [{}])[0].get("text", "")
@@ -816,7 +898,7 @@ def cmd_render(args: argparse.Namespace) -> None:
 
     section("Medications", (
         "- " + (
-            m.get("medicationCodeableConcept", {}).get("text")
+            _concept_text(m.get("medicationCodeableConcept"))
             or m.get("medicationReference", {}).get("display", "?")
         )
         + (f" — {m['dosageInstruction'][0].get('text','')}"
@@ -825,20 +907,26 @@ def cmd_render(args: argparse.Namespace) -> None:
         for m in meds
     ))
 
-    # Labs: newest first, flag anything abnormal.
+    # Labs: newest first, flag anything abnormal. A value with no reference
+    # range is hard to act on, so the range gets its own column.
     lab_rows = []
     for o in sorted(labs, key=lambda x: x.get("effectiveDateTime", ""), reverse=True):
         val = _obs_value(o)
         if not val:
-            continue
+            # Dropping these hid ordered-but-unresulted tests entirely, which
+            # reads as though they were never done.
+            val = (_concept_text(o.get("dataAbsentReason"))
+                   or ("see report" if o.get("hasMember") or o.get("derivedFrom")
+                       else "not reported"))
+            val = f"_{val}_"
         flag = _flag(o)
         lab_rows.append(
-            f"| {o.get('effectiveDateTime','')[:10]} | {o.get('code',{}).get('text','?')} "
-            f"| {val} | {'**' + flag + '**' if flag else ''} |"
+            f"| {_obs_date(o)} | {_concept_text(o.get('code')) or '?'} "
+            f"| {val} | {_ref_range(o)} | {'**' + flag + '**' if flag else ''} |"
         )
     if lab_rows:
-        md += ["## Lab results", "", "| Date | Test | Value | Flag |",
-               "|---|---|---|---|"] + lab_rows + [""]
+        md += ["## Lab results", "", "| Date | Test | Value | Reference range | Flag |",
+               "|---|---|---|---|---|"] + lab_rows + [""]
 
     # Vitals were pulled and saved but never rendered, so 254 measurements
     # were invisible in the readable record. Newest first, most recent 60 —
@@ -850,8 +938,8 @@ def cmd_render(args: argparse.Namespace) -> None:
         if not val:
             continue
         vital_rows.append(
-            f"| {o.get('effectiveDateTime','')[:10]} "
-            f"| {o.get('code',{}).get('text','?')} | {val} |")
+            f"| {_obs_date(o)} "
+            f"| {_concept_text(o.get('code')) or '?'} | {val} |")
     if vital_rows:
         shown, extra = vital_rows[:60], max(0, len(vital_rows) - 60)
         md += ["## Vitals", "", "| Date | Measurement | Value |",
@@ -861,17 +949,64 @@ def cmd_render(args: argparse.Namespace) -> None:
                    f"`raw/Observation_vitalsigns.json`._", ""]
 
     section("Immunizations", (
-        f"- {i.get('vaccineCode',{}).get('text','?')} — {i.get('occurrenceDateTime','')[:10]}"
+        f"- {_concept_text(i.get('vaccineCode')) or '?'} — "
+        f"{_local_date(i.get('occurrenceDateTime',''))}"
         for i in immunizations
     ))
 
+    section("Social history", (
+        f"- {_concept_text(s.get('code')) or '?'}: "
+        f"{_obs_value(s) or '_not reported_'}"
+        + (f" — {_obs_date(s)}" if _obs_date(s) else "")
+        for s in social
+    ))
+
     section("Encounters", (
-        f"- {e.get('period',{}).get('start','')[:10]} — "
-        f"{e.get('type',[{}])[0].get('text','visit') if e.get('type') else 'visit'}"
+        f"- {_local_date(e.get('period',{}).get('start',''))} — "
+        f"{_concept_text(e.get('type',[{}])[0]) if e.get('type') else 'visit'}"
         + (f" ({e['serviceProvider'].get('display','')})" if e.get("serviceProvider") else "")
         for e in sorted(encounters,
                         key=lambda x: x.get("period", {}).get("start", ""),
                         reverse=True)
+    ))
+
+    # What was actually assessed at each visit — distinct from the standing
+    # problem list, and previously not rendered at all.
+    section("Visit diagnoses", (
+        f"- {_local_date(c.get('recordedDate',''))} — "
+        f"{_concept_text(c.get('code')) or '?'}"
+        for c in sorted(visit_dx, key=lambda x: x.get("recordedDate", ""),
+                        reverse=True)
+    ))
+
+    section("Procedures", (
+        f"- {_local_date(p.get('performedDateTime','') or (p.get('performedPeriod',{}) or {}).get('start',''))} — "
+        f"{_concept_text(p.get('code')) or '?'}"
+        + (f"  _({p.get('status','')})_" if p.get("status") else "")
+        for p in sorted(procedures,
+                        key=lambda x: x.get("performedDateTime", ""), reverse=True)
+    ))
+
+    section("Care team", (
+        f"- {(pt.get('member',{}) or {}).get('display','?')}"
+        + (f" — {', '.join(filter(None, (_concept_text(r) for r in pt.get('role', []))))}"
+           if pt.get("role") else "")
+        for ct in care_team for pt in ct.get("participant", []) or []
+    ))
+
+    section("Care plans", (
+        f"- {', '.join(filter(None, (_concept_text(c) for c in cp.get('category', [])))) or 'care plan'}"
+        + (f"  _({cp.get('status','')})_" if cp.get("status") else "")
+        + (f" — addresses {', '.join(a.get('display','') for a in cp.get('addresses', []) if a.get('display'))}"
+           if cp.get("addresses") else "")
+        for cp in care_plans
+    ))
+
+    section("Goals", (
+        f"- {_concept_text(g.get('description')) or '?'}"
+        + (f" — started {_local_date(g['startDate'])}" if g.get("startDate") else "")
+        + (f"  _({g.get('lifecycleStatus','')})_" if g.get("lifecycleStatus") else "")
+        for g in sorted(goals, key=lambda x: x.get("startDate", ""), reverse=True)
     ))
 
     section("Clinical notes", (
@@ -880,7 +1015,7 @@ def cmd_render(args: argparse.Namespace) -> None:
     ))
 
     section("Reports", (
-        f"- {r.get('effectiveDateTime','')[:10]} — {r.get('code',{}).get('text','?')} "
+        f"- {_obs_date(r)} — {_concept_text(r.get('code')) or '?'} "
         f"_({r.get('status','')})_"
         for r in sorted(reports,
                         key=lambda x: x.get("effectiveDateTime", ""), reverse=True)

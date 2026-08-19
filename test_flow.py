@@ -8,6 +8,7 @@ Binary note retrieval, token refresh, and rendering.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -101,7 +102,7 @@ def main() -> int:
     man = json.loads((OUT / "manifest.json").read_text(encoding="utf-8"))
     check("Patient pulled", (raw / "Patient.json").exists())
     labs = json.loads((raw / "Observation_laboratory.json").read_text(encoding="utf-8"))
-    check("pagination followed (4 labs across 2 pages)", len(labs) == 4, f"got {len(labs)}")
+    check("pagination followed (5 labs across 3 pages)", len(labs) == 5, f"got {len(labs)}")
     meds = json.loads((raw / "MedicationRequest.json").read_text(encoding="utf-8"))
     check("medications pulled", len(meds) == 2, f"got {len(meds)}")
     check("unsupported types skipped cleanly",
@@ -125,6 +126,16 @@ def main() -> int:
     check("notes with near-identical ids both survive",
           "no acute cardiopulmonary" in all_text
           and "ejection fraction" in all_text)
+
+    # A note removed from the record upstream would otherwise linger forever,
+    # making the folder look fuller than the index admits.
+    orphan = OUT / "notes" / "2019-01-01-note-from-an-old-run-deadbeef.txt"
+    orphan.write_text("stale content from a previous export", encoding="utf-8")
+    ex.cmd_pull(args)
+    check("stale note files pruned on re-pull", not orphan.exists())
+    idx2 = json.loads((OUT / "notes_index.json").read_text(encoding="utf-8"))
+    check("index still matches disk after re-pull",
+          len(idx2) == len(list((OUT / "notes").glob("*.txt"))))
 
     # A real Epic mixes an OperationOutcome into every search bundle. Treating
     # those as clinical records inflates every count by one and renders them as
@@ -172,6 +183,36 @@ def main() -> int:
     check("vitals rendered, not just pulled", "## Vitals" in md)
     check("component-based blood pressure renders a value",
           re.search(r"\|\s*128/78", md) is not None)
+
+    # Six resource types were pulled, saved, and never rendered. index.html
+    # promises two of them ("Care plan and team", "Procedure") by name.
+    for heading, needle in [
+        ("Visit diagnoses", "Stomach ache"),
+        ("Procedures", "TRANSTHORACIC ECHO"),
+        ("Social history", "Never smoker"),
+        ("Care team", "Dr. A. Chen"),
+        ("Care plans", "Assessment and Plan"),
+        ("Goals", "Walk 30 minutes daily"),
+    ]:
+        check(f"{heading.lower()} rendered", f"## {heading}" in md and needle in md)
+
+    check("CodeableConcept falls back to coding.display, not '?'",
+          "Hemoglobin A1c" in md and "| ? |" not in md)
+    check("lab reference range rendered", "4.0–5.6 %" in md)
+    check("ordered-but-unresulted lab still listed, not dropped",
+          "Vitamin D" in md and "Not performed" in md)
+
+    # FHIR instants are UTC; the record should show the day the patient lived.
+    ts = "2026-08-19T02:27:12Z"
+    want = (dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+              .astimezone().date().isoformat())
+    check("instant converted to local date", ex._local_date(ts) == want, want)
+    check("date-only value never shifted",
+          ex._local_date("2005-09-20") == "2005-09-20")
+    if dt.datetime.now().astimezone().utcoffset() != dt.timedelta(0):
+        # Only observable off UTC; CI runners are UTC, so this is conditional.
+        check("naive [:10] slicing would have been wrong here",
+              ex._local_date(ts) != ts[:10], f"{ex._local_date(ts)} vs {ts[:10]}")
     check("non-cp1252 clinical text survives to HTML",
           "β-thalassemia minor" in html)
     check("no stray '?' rows from outcome entries", "- ?" not in md)
