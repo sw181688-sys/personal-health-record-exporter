@@ -29,6 +29,7 @@ import os
 import re
 import secrets
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -93,18 +94,38 @@ def die(msg: str) -> "NoReturn":  # type: ignore[valid-type]
     sys.exit(1)
 
 
+def lock_down(path: Path) -> None:
+    """Restrict a file or directory to the current user only.
+
+    Windows has no POSIX permission bits: os.chmod() there can only toggle
+    the read-only attribute, so passing 0o600/0o700 is silently a no-op as
+    far as *who* can read the file — it stays readable by any local account.
+    Use icacls (built into Windows, no extra dependency) to strip inherited
+    permissions and grant access to the current user only. Elsewhere, a
+    plain chmod does the job.
+    """
+    if os.name == "nt":
+        user = os.environ.get("USERNAME") or os.getlogin()
+        subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+            check=False, capture_output=True,
+        )
+    else:
+        os.chmod(path, 0o700 if path.is_dir() else 0o600)
+
+
 def state_dir(out: Path) -> Path:
     d = out / ".auth"
     d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
+    lock_down(d)
     return d
 
 
 def save_json(path: Path, obj: Any, private: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2))
+    path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
     if private:
-        os.chmod(path, 0o600)
+        lock_down(path)
 
 
 # --------------------------------------------------------------------------
@@ -252,7 +273,7 @@ def _self_signed_cert(dirpath: Path) -> tuple[Path, Path]:
             serialization.NoEncryption(),
         )
     )
-    os.chmod(key, 0o600)
+    lock_down(key)
     cert.write_bytes(crt.public_bytes(serialization.Encoding.PEM))
     return cert, key
 
@@ -362,7 +383,7 @@ def load_tokens(out: Path) -> dict:
     p = state_dir(out) / "tokens.json"
     if not p.exists():
         die("no cached tokens — run `login` first")
-    tok = json.loads(p.read_text())
+    tok = json.loads(p.read_text(encoding="utf-8"))
     age = int(time.time()) - tok.get("_obtained_at", 0)
     expired = age > max(tok.get("expires_in", 3600) - 60, 0)
 
@@ -521,7 +542,7 @@ def cmd_pull(args: argparse.Namespace) -> None:
             slug = re.sub(r"[^a-zA-Z0-9]+", "-", f"{when}-{title}").strip("-").lower()[:80]
             fn = notes_dir / f"{slug}-{dr.get('id','x')[:8]}.txt"
             fn.parent.mkdir(parents=True, exist_ok=True)
-            fn.write_text(text)
+            fn.write_text(text, encoding="utf-8")
             note_index.append({"date": when, "title": title, "file": fn.name,
                                "chars": len(text)})
             break
@@ -571,7 +592,7 @@ def cmd_render(args: argparse.Namespace) -> None:
 
     def load(stem: str) -> list[dict]:
         p = raw / f"{stem}.json"
-        return json.loads(p.read_text()) if p.exists() else []
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
 
     patient = (load("Patient") or [{}])[0]
     name = ""
@@ -587,10 +608,10 @@ def cmd_render(args: argparse.Namespace) -> None:
     reports = load("DiagnosticReport_LAB") + load("DiagnosticReport_RAD")
     encounters = load("Encounter")
     immunizations = load("Immunization")
-    notes = json.loads((out / "notes_index.json").read_text()) if (out / "notes_index.json").exists() else []
+    notes = json.loads((out / "notes_index.json").read_text(encoding="utf-8")) if (out / "notes_index.json").exists() else []
 
     md: list[str] = [f"# Medical record — {name or 'patient'}", ""]
-    md.append(f"_Exported {dt.datetime.now():%B %d, %Y} from {json.loads((out/'manifest.json').read_text()).get('fhir_base','')}_")
+    md.append(f"_Exported {dt.datetime.now():%B %d, %Y} from {json.loads((out/'manifest.json').read_text(encoding='utf-8')).get('fhir_base','')}_")
     md.append("")
 
     def section(title: str, rows: Iterable[str]) -> None:
@@ -673,7 +694,7 @@ def cmd_render(args: argparse.Namespace) -> None:
     ))
 
     md_text = "\n".join(md)
-    (out / "record.md").write_text(md_text)
+    (out / "record.md").write_text(md_text, encoding="utf-8")
 
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Medical record — {name}</title>
@@ -692,7 +713,7 @@ def cmd_render(args: argparse.Namespace) -> None:
 </style></head><body>
 {_md_to_html(md_text)}
 </body></html>"""
-    (out / "record.html").write_text(html)
+    (out / "record.html").write_text(html, encoding="utf-8")
     print(f"\nWrote {out/'record.md'} and {out/'record.html'}")
 
 

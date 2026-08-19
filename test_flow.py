@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,21 @@ def check(label: str, cond: bool, detail: str = "") -> None:
     print(f"  [{'PASS' if cond else 'FAIL'}] {label}" + (f" — {detail}" if detail else ""))
     if not cond:
         FAILS.append(label)
+
+
+def is_locked_down(path: Path) -> tuple[bool, str]:
+    """Mirrors epic_export.lock_down()'s two code paths so the test verifies
+    what actually happened rather than a POSIX-only st_mode value."""
+    if os.name == "nt":
+        out = subprocess.run(["icacls", str(path)], capture_output=True,
+                              text=True, check=False).stdout
+        user = (os.environ.get("USERNAME") or "").lower()
+        first_line = out.strip().splitlines()[0] if out.strip() else "no icacls output"
+        ok = bool(user) and user in out.lower() and "everyone" not in out.lower() \
+            and "builtin\\users" not in out.lower()
+        return ok, first_line
+    mode = oct(path.stat().st_mode)[-3:]
+    return mode == "600", mode
 
 
 def main() -> int:
@@ -67,8 +83,8 @@ def main() -> int:
     check("patient context returned", tok.get("patient") == mock_epic.PATIENT_ID)
     check("refresh token stored", bool(tok.get("refresh_token")))
     tf = OUT / ".auth" / "tokens.json"
-    check("token file is 0600", oct(tf.stat().st_mode)[-3:] == "600",
-          oct(tf.stat().st_mode)[-3:])
+    locked, detail = is_locked_down(tf)
+    check("token file restricted to owner", locked, detail)
 
     print("\n2. PKCE is actually enforced by the server")
     bad = requests.post(f"http://127.0.0.1:{mock_epic.PORT}/oauth2/token", data={
@@ -80,30 +96,30 @@ def main() -> int:
     print("\n3. pull")
     ex.cmd_pull(args)
     raw = OUT / "raw"
-    man = json.loads((OUT / "manifest.json").read_text())
+    man = json.loads((OUT / "manifest.json").read_text(encoding="utf-8"))
     check("Patient pulled", (raw / "Patient.json").exists())
-    labs = json.loads((raw / "Observation_laboratory.json").read_text())
+    labs = json.loads((raw / "Observation_laboratory.json").read_text(encoding="utf-8"))
     check("pagination followed (4 labs across 2 pages)", len(labs) == 4, f"got {len(labs)}")
-    meds = json.loads((raw / "MedicationRequest.json").read_text())
+    meds = json.loads((raw / "MedicationRequest.json").read_text(encoding="utf-8"))
     check("medications pulled", len(meds) == 2, f"got {len(meds)}")
     check("unsupported types skipped cleanly",
           not (raw / "Device.json").exists())
     check("note body fetched from Binary", man.get("notes") == 1, str(man.get("notes")))
     notes = list((OUT / "notes").glob("*.txt"))
-    body = notes[0].read_text() if notes else ""
+    body = notes[0].read_text(encoding="utf-8") if notes else ""
     check("note HTML stripped to text", "Assessment:" in body and "<p>" not in body)
     check("note content intact", "A1c down from 8.1 to 7.4" in body)
 
     print("\n4. token refresh path")
-    t = json.loads(tf.read_text()); t["_obtained_at"] = 0; t["expires_in"] = 1
-    tf.write_text(json.dumps(t))
+    t = json.loads(tf.read_text(encoding="utf-8")); t["_obtained_at"] = 0; t["expires_in"] = 1
+    tf.write_text(json.dumps(t), encoding="utf-8")
     refreshed = ex.load_tokens(OUT)
     check("expired token refreshed", refreshed["access_token"] == "TOKEN-REFRESHED")
 
     print("\n5. render")
     ex.cmd_render(args)
-    md = (OUT / "record.md").read_text()
-    html = (OUT / "record.html").read_text()
+    md = (OUT / "record.md").read_text(encoding="utf-8")
+    html = (OUT / "record.html").read_text(encoding="utf-8")
     check("markdown written", len(md) > 200)
     check("patient name in output", "Camila Lopez" in md)
     check("abnormal lab flagged", "**H**" in md)
@@ -120,8 +136,8 @@ def main() -> int:
     check("offline_access not in default scopes", "offline_access" not in ex.DEFAULT_SCOPES)
     t2 = ex.do_login(a2)
     tf2 = Path(a2.out) / ".auth" / "tokens.json"
-    d = json.loads(tf2.read_text()); d.pop("refresh_token", None)
-    d["_obtained_at"] = 0; d["expires_in"] = 1; tf2.write_text(json.dumps(d))
+    d = json.loads(tf2.read_text(encoding="utf-8")); d.pop("refresh_token", None)
+    d["_obtained_at"] = 0; d["expires_in"] = 1; tf2.write_text(json.dumps(d), encoding="utf-8")
     try:
         ex.load_tokens(Path(a2.out)); ok = False
     except SystemExit:
