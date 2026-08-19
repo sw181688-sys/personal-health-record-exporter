@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personal Health Record Exporter</title>
+<meta name="description" content="An open-source tool that lets a patient download their own medical record from their provider's patient portal onto their own computer. Read-only, runs locally, sends data nowhere.">
+<style>
+  :root{
+    --bg:#ffffff; --fg:#16181d; --muted:#5c6370; --rule:#e6e8ec;
+    --accent:#1f6feb; --card:#f7f8fa; --good:#0f7b4f; --warn:#8a5a00;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0f1115;--fg:#e6e8ec;--muted:#9aa3b2;--rule:#242833;
+          --accent:#6ea8fe;--card:#161a21;--good:#4ec98a;--warn:#e0b155;}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:50rem;margin:0 auto;padding:4rem 1.5rem 6rem}
+  header{border-bottom:1px solid var(--rule);padding-bottom:2rem;margin-bottom:2.5rem}
+  h1{font-size:2.1rem;line-height:1.2;margin:0 0 .6rem;letter-spacing:-.02em}
+  .tag{font-size:1.12rem;color:var(--muted);margin:0}
+  h2{font-size:1.3rem;margin:3rem 0 .9rem;letter-spacing:-.01em}
+  h3{font-size:1.02rem;margin:1.8rem 0 .5rem}
+  p{margin:0 0 1rem}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  ul{padding-left:1.2rem;margin:0 0 1rem}
+  li{margin:.35rem 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--card);
+    padding:.12rem .38rem;border-radius:4px}
+  pre{background:var(--card);border:1px solid var(--rule);border-radius:8px;
+    padding:1rem 1.1rem;overflow-x:auto;font-family:var(--mono);font-size:.85rem;
+    line-height:1.55}
+  pre code{background:none;padding:0}
+  table{border-collapse:collapse;width:100%;font-size:.94rem;margin:0 0 1rem}
+  th,td{text-align:left;padding:.55rem .7rem;border-bottom:1px solid var(--rule);
+    vertical-align:top}
+  th{font-weight:600;font-size:.82rem;text-transform:uppercase;
+    letter-spacing:.04em;color:var(--muted)}
+  .badges{display:flex;gap:.5rem;flex-wrap:wrap;margin:1.4rem 0 0}
+  .badge{font-size:.79rem;padding:.28rem .65rem;border:1px solid var(--rule);
+    border-radius:999px;color:var(--muted);background:var(--card)}
+  .callout{background:var(--card);border:1px solid var(--rule);
+    border-left:3px solid var(--accent);border-radius:6px;padding:1rem 1.2rem;
+    margin:1.5rem 0}
+  .callout p:last-child{margin-bottom:0}
+  .no li{list-style:none;position:relative;padding-left:1.5rem}
+  .no li::before{content:"✕";position:absolute;left:0;color:var(--good);
+    font-weight:700}
+  footer{margin-top:4rem;padding-top:1.8rem;border-top:1px solid var(--rule);
+    font-size:.83rem;color:var(--muted)}
+  footer p{margin:0 0 .8rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Personal Health Record Exporter</h1>
+  <p class="tag">An open-source tool that lets a patient download their own
+  medical record from their healthcare provider's patient portal, onto their
+  own computer.</p>
+  <div class="badges">
+    <span class="badge">Read-only</span>
+    <span class="badge">Runs locally</span>
+    <span class="badge">No server, no account</span>
+    <span class="badge">MIT licensed</span>
+  </div>
+</header>
+
+<p>This app connects to a healthcare organization's standards-based patient API,
+downloads the signed-in patient's own record, and turns it into a readable
+document — clinical notes, lab results, medications, problems, allergies,
+immunizations, and visit history — alongside the underlying structured data in
+FHIR® format.</p>
+
+<p>It runs entirely on your own machine. There is no server, no account, and no
+company behind it. Your health data is never transmitted anywhere except between
+your own computer and your own provider.</p>
+
+<p><strong>Source code:</strong>
+<a href="https://github.com/sw181688-sys/personal-health-record-exporter">github.com/sw181688-sys/personal-health-record-exporter</a>
+— all of it, nothing hidden.</p>
+
+<h2>Who this is for</h2>
+<p>People who want a durable, portable copy of their own medical record rather
+than clicking through a patient portal one page at a time — and family
+caretakers who manage care for someone else and need the whole picture in one
+place.</p>
+<div class="callout">
+  <p>If you are managing another person's care, use your provider's proxy or
+  shared-access process so you sign in with your own credentials against their
+  record. Don't use someone else's login.</p>
+</div>
+
+<h2>What data this app requests, and why</h2>
+<p>The app requests <strong>read-only</strong> access to the categories below.
+Each is part of the US Core Data for Interoperability (USCDI) — the standard set
+of health data US patients have a legal right to access electronically.</p>
+
+<table>
+  <thead><tr><th>Data requested</th><th>Why the app asks for it</th></tr></thead>
+  <tbody>
+    <tr><td>Patient demographics</td><td>To label the export and confirm whose chart was downloaded</td></tr>
+    <tr><td>Clinical notes<br><code>DocumentReference</code>, <code>Binary</code></td><td>The narrative your clinician wrote — the most useful part of a record for a patient or caretaker</td></tr>
+    <tr><td>Lab results<br><code>Observation</code>, <code>DiagnosticReport</code></td><td>Test values with units and abnormal flags, so results can be tracked over time</td></tr>
+    <tr><td>Vital signs<br><code>Observation</code></td><td>Blood pressure, weight, and similar measurements</td></tr>
+    <tr><td>Medications<br><code>MedicationRequest</code></td><td>Current prescriptions and dosage instructions</td></tr>
+    <tr><td>Health problems<br><code>Condition</code></td><td>Active problem list and visit diagnoses</td></tr>
+    <tr><td>Allergies<br><code>AllergyIntolerance</code></td><td>Allergies and their reactions</td></tr>
+    <tr><td>Immunizations<br><code>Immunization</code></td><td>Vaccination history</td></tr>
+    <tr><td>Visits<br><code>Encounter</code>, <code>Procedure</code></td><td>When care happened, where, and with whom</td></tr>
+    <tr><td>Care plan and team<br><code>CarePlan</code>, <code>CareTeam</code>, <code>Goal</code></td><td>Treatment plans and who is involved in care</td></tr>
+  </tbody>
+</table>
+
+<h3>What this app does <em>not</em> do</h3>
+<ul class="no">
+  <li><strong>It cannot change anything in your medical record.</strong> The app
+    only ever issues read requests. There is no code path in it that writes,
+    updates, or deletes.</li>
+  <li><strong>It does not send your data anywhere.</strong> Everything is written
+    to a folder on your computer. No backend, no cloud storage, no analytics, no
+    telemetry, no third-party services.</li>
+  <li><strong>It does not see your password.</strong> You sign in on your
+    provider's own login page in your own browser. The app receives only the
+    authorization code handed back afterward.</li>
+  <li><strong>It does not request refresh tokens by default</strong>, so access
+    expires quickly and you re-authorize each time you run it.</li>
+  <li><strong>It does not access anyone else's record.</strong> Access is limited
+    to the patient who signed in.</li>
+</ul>
+
+<h2>Where your data goes</h2>
+<p>Into a folder you choose on your own computer:</p>
+<pre><code>record/
+  raw/          the structured FHIR data, one file per category
+  notes/        your clinical notes as plain text
+  record.html   a readable, printable version of the whole record
+  record.md     the same in Markdown
+  .auth/        your access token (file permissions 0600)</code></pre>
+<p>Treat that folder the way you'd treat a printout of your chart. The
+<code>.auth</code> folder holds a credential that can read your record until it
+expires; the project's <code>.gitignore</code> keeps all of it out of version
+control.</p>
+
+<h2>Revoking access</h2>
+<p>You can disconnect this app from your record at any time — from your patient
+portal, not from this app. In MyChart®-based portals this is usually under
+<strong>Account Settings → Linked Apps and Devices</strong> (sometimes "Manage
+Access" or "Third-Party Apps"). Deleting the <code>record/.auth</code> folder on
+your computer also destroys the local copy of the token.</p>
+
+<h2>Security</h2>
+<ul>
+  <li>Public OAuth 2.0 client using PKCE (RFC 7636) — no client secret, because
+    a local script has nowhere safe to keep one.</li>
+  <li>The <code>state</code> parameter is verified on the callback to prevent
+    request forgery.</li>
+  <li>The OAuth redirect is served over TLS on <code>localhost</code> only and is
+    never exposed to the network.</li>
+  <li>Tokens are stored with <code>0600</code> permissions and are never logged.</li>
+</ul>
+
+<h2>Support</h2>
+<p>Please open an issue on
+<a href="https://github.com/sw181688-sys/personal-health-record-exporter/issues">the GitHub repository</a>.
+This is a personal open-source project maintained in spare time; there is no
+support team and no guaranteed response time.</p>
+
+<footer>
+  <p>MIT licensed. Provided as-is, with no warranty. This tool is not a medical
+  device and does not provide medical advice. It reformats information your
+  provider already gave you; always confirm anything clinically important with
+  your care team, and read exported results in the context of your clinician's
+  interpretation rather than in isolation.</p>
+
+  <p>Epic® and MyChart® are trademarks of Epic Systems Corporation. FHIR® is a
+  registered trademark of Health Level Seven International. This project is an
+  independent, unaffiliated open-source tool. It is not produced, endorsed,
+  sponsored, or certified by Epic Systems Corporation, HL7, or any healthcare
+  provider organization. References to these names are solely to describe the
+  standards and systems this software interoperates with.</p>
+</footer>
+
+</div>
+</body>
+</html>

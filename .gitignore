@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Never commit health data or credentials.
+#
+# The exporter writes everything into its --out directory. These rules cover
+# the default (./record), the sandbox run (./sandbox), and the auth/token
+# material wherever it lands. If you use a different --out name, add it here
+# BEFORE your first run.
+# ---------------------------------------------------------------------------
+record/
+sandbox/
+out/
+*.auth/
+.auth/
+tokens.json
+*.crt
+*.key
+
+# Exported record artifacts, in case they're ever written outside --out
+raw/
+notes/
+notes_index.json
+manifest.json
+record.md
+record.html
+
+# ---------------------------------------------------------------------------
+# Ordinary Python noise
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
