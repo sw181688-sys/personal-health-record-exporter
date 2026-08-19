@@ -73,11 +73,23 @@ DATA = {
          "dosageInstruction": [{"text": "Take 1 tablet daily"}]},
     ],
     ("Observation", "laboratory"): [obs(i, *l) for i, l in enumerate(LABS)],
+    # Real Epic sends blood pressure as components with no top-level value —
+    # 92 of the 254 sandbox vitals look like this.
     ("Observation", "vital-signs"): [{
         "resourceType": "Observation", "id": "v1", "status": "final",
         "category": [{"coding": [{"code": "vital-signs"}]}],
-        "code": {"text": "Blood pressure"}, "effectiveDateTime": "2026-07-14T10:00:00Z",
-        "valueString": "128/78 mmHg",
+        "code": {"text": "Blood Pressure"}, "effectiveDateTime": "2026-07-14T10:00:00Z",
+        "component": [
+            {"code": {"text": "Systolic blood pressure"},
+             "valueQuantity": {"value": 128, "unit": "mm[Hg]"}},
+            {"code": {"text": "Diastolic blood pressure"},
+             "valueQuantity": {"value": 78, "unit": "mm[Hg]"}},
+        ],
+    }, {
+        "resourceType": "Observation", "id": "v2", "status": "final",
+        "category": [{"coding": [{"code": "vital-signs"}]}],
+        "code": {"text": "Weight"}, "effectiveDateTime": "2026-07-14T10:00:00Z",
+        "valueQuantity": {"value": 71.2, "unit": "kg"},
     }],
     ("Immunization", ""): [
         {"resourceType": "Immunization", "id": "i1",
@@ -95,6 +107,19 @@ DATA = {
          "type": {"text": "Progress Note"}, "date": "2026-07-14T11:02:00Z",
          "content": [{"attachment": {"contentType": "text/html",
                                      "url": f"{BASE}/Binary/bin1"}}]},
+        # Epic's ids share long prefixes and differ only near the end. Two of
+        # them here so a filename built from a truncated id collides and one
+        # note is lost — which is exactly what happened against the sandbox.
+        {"resourceType": "DocumentReference",
+         "id": "ewtIzA62-DkL21MnJY6OyRj8UF8vh7UuasqvGB1pc5CY3",
+         "type": {"text": "Imaging Note"}, "date": "2026-07-02T09:00:00Z",
+         "content": [{"attachment": {"contentType": "text/html",
+                                     "url": f"{BASE}/Binary/bin2"}}]},
+        {"resourceType": "DocumentReference",
+         "id": "ewtIzA62-DkL21MnJY6OyRhIhI5asLLt7L5RQtNUW6qY3",
+         "type": {"text": "Imaging Note"}, "date": "2026-07-02T09:00:00Z",
+         "content": [{"attachment": {"contentType": "text/html",
+                                     "url": f"{BASE}/Binary/bin3"}}]},
     ],
     ("DiagnosticReport", "LAB"): [
         {"resourceType": "DiagnosticReport", "id": "d1", "status": "final",
@@ -184,8 +209,14 @@ class H(BaseHTTPRequestHandler):
 
         m = re.match(r".*/api/FHIR/R4/Binary/(\w+)$", path)
         if m:
+            # Distinct bodies per Binary, so a collision loses visible content.
+            bodies = {"bin2": "<p>Imaging note A: chest x-ray, no acute "
+                              "cardiopulmonary process identified.</p>",
+                      "bin3": "<p>Imaging note B: echocardiogram, normal "
+                              "ejection fraction estimated at 60 percent.</p>"}
+            html = bodies.get(m.group(1), NOTE_HTML)
             return self._send({"resourceType": "Binary", "contentType": "text/html",
-                               "data": base64.b64encode(NOTE_HTML.encode()).decode()})
+                               "data": base64.b64encode(html.encode()).decode()})
 
         m = re.match(r".*/api/FHIR/R4/(\w+)$", path)
         if not m:

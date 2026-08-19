@@ -128,8 +128,17 @@ def state_dir(out: Path) -> Path:
 
 
 def save_json(path: Path, obj: Any, private: bool = False) -> None:
+    """Write JSON atomically so an interrupted run can't leave a half file.
+
+    A truncated raw/*.json or manifest.json is worse than none: render would
+    read it back and quietly produce a short record.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    if private:
+        lock_down(tmp)  # never let the token exist unprotected, even briefly
+    os.replace(tmp, path)
     if private:
         lock_down(path)
 
@@ -469,7 +478,20 @@ def fetch_all(session: requests.Session, base: str, rtype: str,
     resources: list[dict] = []
     warnings: list[str] = []
     first = True
+    # A server that returns a next link pointing at the current page (or a
+    # cycle of them) would spin here forever. Bound it and say so.
+    seen_urls: set[str] = set()
+    max_pages = 500
     while url:
+        if url in seen_urls or len(seen_urls) >= max_pages:
+            reason = ("repeated a pagination link" if url in seen_urls
+                      else f"exceeded {max_pages} pages")
+            log(f"{rtype}: stopping — the server {reason}")
+            warnings.append(
+                f"warning: {rtype} may be incomplete — pagination stopped "
+                f"after {len(resources)} records ({reason})")
+            break
+        seen_urls.add(url)
         r = session.get(url, params=params if first else None, timeout=120)
         first = False
         if r.status_code in (401, 403):
@@ -478,6 +500,12 @@ def fetch_all(session: requests.Session, base: str, rtype: str,
             return resources, warnings
         if r.status_code >= 400:
             log(f"{rtype}: HTTP {r.status_code} — {r.text[:200]}")
+            # Bailing out mid-pagination leaves a partial result that the
+            # manifest would otherwise report as a complete count.
+            if resources:
+                warnings.append(
+                    f"warning: {rtype} is incomplete — the server returned "
+                    f"HTTP {r.status_code} after {len(resources)} records")
             return resources, warnings
         bundle = r.json()
         if bundle.get("resourceType") == rtype:  # a plain read, not a search
@@ -543,7 +571,11 @@ def fetch_note_text(session: requests.Session, base: str, att: dict) -> str | No
         body = re.sub(r"[ \t]+", " ", body)
         body = re.sub(r"\n\s*\n\s*\n+", "\n\n", body)
         return body.strip()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # Returning None silently turned a timeout or a decode error into a
+        # note that simply isn't there. Notes are the most valuable part of
+        # the record; a missing one has to be visible.
+        log(f"note fetch failed ({type(e).__name__}: {str(e)[:120]})")
         return None
 
 
@@ -612,13 +644,24 @@ def cmd_pull(args: argparse.Namespace) -> None:
             if not text or len(text) < 20:
                 continue
             slug = re.sub(r"[^a-zA-Z0-9]+", "-", f"{when}-{title}").strip("-").lower()[:80]
-            fn = notes_dir / f"{slug}-{dr.get('id','x')[:8]}.txt"
+            # The id must not be truncated. Epic's DocumentReference ids share
+            # long prefixes ("ewtIzA62-DkL21MnJY6OyR..."), so taking the first
+            # 8 characters collided and one note silently overwrote another.
+            # Hash the whole id: fixed length, stable across runs, no collision.
+            digest = hashlib.sha256(dr.get("id", "").encode()).hexdigest()[:12]
+            fn = notes_dir / f"{slug}-{digest}.txt"
             fn.parent.mkdir(parents=True, exist_ok=True)
             fn.write_text(text, encoding="utf-8")
             note_index.append({"date": when, "title": title, "file": fn.name,
-                               "chars": len(text)})
+                               "chars": len(text), "source_id": dr.get("id", "")})
             break
     if note_index:
+        # The index must describe what is actually on disk.
+        on_disk = {p.name for p in notes_dir.glob("*.txt")}
+        indexed = {n["file"] for n in note_index}
+        if len(indexed) != len(note_index) or not indexed <= on_disk:
+            log(f"WARNING: {len(note_index)} notes indexed but "
+                f"{len(indexed)} distinct files — notes may have been lost")
         save_json(out / "notes_index.json", note_index)
         log(f"notes: wrote {len(note_index)} note bodies to {notes_dir}")
 
@@ -659,6 +702,27 @@ def _obs_value(o: dict) -> str:
             return str(o[k])
     if "valueCodeableConcept" in o:
         return o["valueCodeableConcept"].get("text", "")
+    # Blood pressure and friends carry no top-level value — the numbers live in
+    # components. 92 of Epic's 254 sandbox vitals are this shape, so without
+    # this they all render blank.
+    parts = []
+    for c in o.get("component", []) or []:
+        label = (c.get("code", {}) or {}).get("text", "")
+        q = c.get("valueQuantity") or {}
+        val = f"{q.get('value','')} {q.get('unit','')}".strip()
+        if not val:
+            val = ((c.get("valueCodeableConcept") or {}).get("text", "")
+                   or str(c.get("valueString", "")))
+        if val:
+            parts.append(f"{label} {val}".strip() if label else val)
+    if parts:
+        # Systolic/diastolic read better as 122/78 than as two sentences.
+        nums = [re.match(r"^\D*([\d.]+)", p) for p in parts]
+        if (len(parts) == 2 and all(nums)
+                and "blood pressure" in (o.get("code", {}).get("text", "")).lower()):
+            unit = (o["component"][0].get("valueQuantity") or {}).get("unit", "")
+            return f"{nums[0].group(1)}/{nums[1].group(1)} {unit}".strip()
+        return "; ".join(parts)
     return ""
 
 
@@ -775,6 +839,26 @@ def cmd_render(args: argparse.Namespace) -> None:
     if lab_rows:
         md += ["## Lab results", "", "| Date | Test | Value | Flag |",
                "|---|---|---|---|"] + lab_rows + [""]
+
+    # Vitals were pulled and saved but never rendered, so 254 measurements
+    # were invisible in the readable record. Newest first, most recent 60 —
+    # the raw JSON keeps the rest.
+    vital_rows = []
+    for o in sorted(vitals, key=lambda x: x.get("effectiveDateTime", ""),
+                    reverse=True):
+        val = _obs_value(o)
+        if not val:
+            continue
+        vital_rows.append(
+            f"| {o.get('effectiveDateTime','')[:10]} "
+            f"| {o.get('code',{}).get('text','?')} | {val} |")
+    if vital_rows:
+        shown, extra = vital_rows[:60], max(0, len(vital_rows) - 60)
+        md += ["## Vitals", "", "| Date | Measurement | Value |",
+               "|---|---|---|"] + shown + [""]
+        if extra:
+            md += [f"_{extra} older vital-sign readings are in "
+                   f"`raw/Observation_vitalsigns.json`._", ""]
 
     section("Immunizations", (
         f"- {i.get('vaccineCode',{}).get('text','?')} — {i.get('occurrenceDateTime','')[:10]}"

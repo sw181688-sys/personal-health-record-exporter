@@ -106,11 +106,25 @@ def main() -> int:
     check("medications pulled", len(meds) == 2, f"got {len(meds)}")
     check("unsupported types skipped cleanly",
           not (raw / "Device.json").exists())
-    check("note body fetched from Binary", man.get("notes") == 1, str(man.get("notes")))
-    notes = list((OUT / "notes").glob("*.txt"))
-    body = notes[0].read_text(encoding="utf-8") if notes else ""
+    check("note body fetched from Binary", man.get("notes") == 3, str(man.get("notes")))
+    prog = [p for p in (OUT / "notes").glob("*.txt") if "progress" in p.name]
+    body = prog[0].read_text(encoding="utf-8") if prog else ""
     check("note HTML stripped to text", "Assessment:" in body and "<p>" not in body)
     check("note content intact", "A1c down from 8.1 to 7.4" in body)
+
+    # Truncating the FHIR id to build a filename made two Epic notes collide,
+    # and one silently overwrote the other. The index must match disk 1:1.
+    idx = json.loads((OUT / "notes_index.json").read_text(encoding="utf-8"))
+    on_disk = {p.name for p in (OUT / "notes").glob("*.txt")}
+    check("every indexed note exists on disk 1:1",
+          len({n["file"] for n in idx}) == len(idx) == len(on_disk),
+          f"{len(idx)} indexed / {len({n['file'] for n in idx})} distinct / "
+          f"{len(on_disk)} files")
+    all_text = "\n".join(p.read_text(encoding="utf-8")
+                         for p in (OUT / "notes").glob("*.txt"))
+    check("notes with near-identical ids both survive",
+          "no acute cardiopulmonary" in all_text
+          and "ejection fraction" in all_text)
 
     # A real Epic mixes an OperationOutcome into every search bundle. Treating
     # those as clinical records inflates every count by one and renders them as
@@ -153,6 +167,11 @@ def main() -> int:
     check("html escaping sane", "<script>" not in html)
     check("non-cp1252 clinical text survives to markdown",
           "β-thalassemia minor" in md)
+    # Vitals were pulled and saved but never rendered, so they were invisible
+    # in the readable record; blood pressure also needs component handling.
+    check("vitals rendered, not just pulled", "## Vitals" in md)
+    check("component-based blood pressure renders a value",
+          re.search(r"\|\s*128/78", md) is not None)
     check("non-cp1252 clinical text survives to HTML",
           "β-thalassemia minor" in html)
     check("no stray '?' rows from outcome entries", "- ?" not in md)
