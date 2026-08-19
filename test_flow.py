@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import requests
@@ -187,7 +188,63 @@ def main() -> int:
         ok = True
     check("expired + no refresh token exits with clear message", ok)
 
-    print("\n7. CLI entrypoint works")
+    print("\n7. the access token stays on the provider's origin")
+    # Every request carries the token in a session header, and the server picks
+    # the pagination and attachment URLs. Following one off-origin hands over a
+    # credential that reads the entire chart.
+    leaked: dict = {}
+
+    class Attacker(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            leaked["auth"] = self.headers.get("Authorization")
+            b = json.dumps({"resourceType": "Bundle", "entry": []}).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+        def log_message(self, *a): pass
+
+    class Hostile(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            b = json.dumps({"resourceType": "Bundle", "entry": [], "link": [
+                {"relation": "next", "url": "http://127.0.0.1:9202/steal"}]}).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+        def log_message(self, *a): pass
+
+    for prt, hnd in ((9201, Hostile), (9202, Attacker)):
+        threading.Thread(target=HTTPServer(("127.0.0.1", prt), hnd).serve_forever,
+                         daemon=True).start()
+    time.sleep(0.3)
+    sess = requests.Session()
+    sess.headers.update({"Authorization": "Bearer SECRET"})
+    _, warns = ex.fetch_all(sess, "http://127.0.0.1:9201/api/FHIR/R4", "Patient", {})
+    check("token not sent to a foreign origin via pagination",
+          leaked.get("auth") is None, str(leaked.get("auth")))
+    check("truncated pagination is reported, not silent",
+          any("another origin" in w for w in warns))
+    check("off-origin note attachment refused",
+          ex.fetch_note_text(sess, "https://real.example/FHIR/R4",
+                             {"url": "https://evil.example/Binary/1",
+                              "contentType": "text/plain"}) is None)
+    check("same-origin URLs still allowed",
+          ex.same_origin(f"{mock_epic.BASE}/Patient?x=1", mock_epic.BASE)
+          and not ex.same_origin("https://evil.example/x", mock_epic.BASE))
+
+    print("\n8. record HTML escapes server-controlled text")
+    ev = Path("/tmp/record-test-xss"); shutil.rmtree(ev, ignore_errors=True)
+    (ev / "raw").mkdir(parents=True)
+    (ev / "raw" / "Patient.json").write_text(json.dumps([{
+        "resourceType": "Patient", "id": "p1",
+        "name": [{"given": ["</title><script>alert(1)</script><title>"],
+                  "family": "X"}]}]), encoding="utf-8")
+    (ev / "manifest.json").write_text(json.dumps({"fhir_base": "https://x/"}),
+                                      encoding="utf-8")
+    import copy as _c
+    a3 = _c.deepcopy(args); a3.out = str(ev)
+    ex.cmd_render(a3)
+    xss = (ev / "record.html").read_text(encoding="utf-8")
+    check("patient name escaped in <title>", "<script>alert(1)" not in xss)
+
+    print("\n9. CLI entrypoint works")
     p = subprocess.run([sys.executable, str(Path(__file__).parent / "epic_export.py"),
                         "--help"], capture_output=True, text=True)
     check("--help exits 0", p.returncode == 0)

@@ -106,10 +106,16 @@ def lock_down(path: Path) -> None:
     """
     if os.name == "nt":
         user = os.environ.get("USERNAME") or os.getlogin()
-        subprocess.run(
+        r = subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-            check=False, capture_output=True,
+            check=False, capture_output=True, text=True,
         )
+        # Never claim the file is protected when it isn't — this holds an
+        # access token for the whole medical record.
+        if r.returncode != 0:
+            log(f"WARNING: could not restrict permissions on {path}")
+            log(f"         {(r.stderr or r.stdout or '').strip()[:200]}")
+            log("         treat that file as readable by other accounts.")
     else:
         os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
@@ -373,7 +379,7 @@ def do_login(args: argparse.Namespace) -> dict:
     tok["_client_id"] = args.client_id
     tok["_token_url"] = token_url
     save_json(sd / "tokens.json", tok, private=True)
-    log(f"tokens cached in {sd/'tokens.json'} (mode 600)")
+    log(f"tokens cached in {sd/'tokens.json'} (restricted to your account)")
     if tok.get("patient"):
         log(f"patient FHIR id: {tok['patient']}")
     return tok
@@ -417,6 +423,22 @@ def load_tokens(out: Path) -> dict:
 # --------------------------------------------------------------------------
 # pulling
 # --------------------------------------------------------------------------
+
+def same_origin(url: str, base: str) -> bool:
+    """True when url sits on the same scheme+host+port as the FHIR base.
+
+    Every request carries the access token in a session header, and both the
+    pagination links and the note attachment URLs are chosen by the server.
+    Following one to another origin hands that token — which reads the whole
+    chart — to whoever is on the other end. Epic keeps both on the API host,
+    so requiring it costs nothing and closes the exfiltration path.
+    """
+    def parts(u: str) -> tuple:
+        p = urllib.parse.urlparse(u)
+        return (p.scheme, (p.hostname or "").lower(),
+                p.port or (443 if p.scheme == "https" else 80))
+    return parts(url) == parts(base)
+
 
 def outcome_issues(oo: dict) -> list[str]:
     """Readable issue strings from an OperationOutcome."""
@@ -474,7 +496,16 @@ def fetch_all(session: requests.Session, base: str, rtype: str,
         url = None
         for link in bundle.get("link", []) or []:
             if link.get("relation") == "next":
-                url = link.get("url")
+                nxt = link.get("url")
+                if nxt and not same_origin(nxt, base):
+                    log(f"{rtype}: refusing to follow pagination to another "
+                        f"origin ({urllib.parse.urlparse(nxt).netloc}); "
+                        f"results may be incomplete")
+                    warnings.append(
+                        "warning: pagination stopped early — the server pointed "
+                        f"to another origin ({urllib.parse.urlparse(nxt).netloc})")
+                    break
+                url = nxt
         params = {}
     return resources, warnings
 
@@ -491,6 +522,11 @@ def fetch_note_text(session: requests.Session, base: str, att: dict) -> str | No
         return None
     if not url.startswith("http"):
         url = base.rstrip("/") + "/" + url.lstrip("/")
+    elif not same_origin(url, base):
+        # The token would go with it. A note isn't worth leaking the chart.
+        log(f"skipping a note attachment on another origin "
+            f"({urllib.parse.urlparse(url).netloc})")
+        return None
     ctype = att.get("contentType", "")
     accept = "text/plain" if "text" in ctype or "rtf" in ctype else "application/fhir+json"
     try:
@@ -632,6 +668,12 @@ def _flag(o: dict) -> str:
         if t and t.upper() not in ("N", "NORMAL"):
             return t
     return ""
+
+
+def html_escape(s: str) -> str:
+    """Escape text going anywhere outside _md_to_html, which escapes its own."""
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def _affects_phrase(affects: list[str], limit: int = 5) -> str:
@@ -778,7 +820,7 @@ def cmd_render(args: argparse.Namespace) -> None:
     (out / "record.md").write_text(md_text, encoding="utf-8")
 
     html = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Medical record — {name}</title>
+<html><head><meta charset="utf-8"><title>Medical record — {html_escape(name)}</title>
 <style>
  body{{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
    max-width:52rem;margin:0 auto;padding:3rem 1.5rem;color:#1a1a1a}}
