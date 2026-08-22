@@ -45,9 +45,42 @@ notes. Sandbox and CI both stay green.
 
 ### What's left
 
-Nothing required. The one open option is registering the APIs that currently
-return 403 (see below) — which needs a **second app registration**, because
-Epic locks an app once it is marked ready for production.
+Nothing required. The tool does what it was built to do.
+
+### Possible future enhancement — register the seven 403 APIs
+
+**Not started, and deliberately deferred.** Seven APIs return 403 on every run
+because they are absent from the app registration, not because of any code
+problem: `Specimen`, `Coverage`, `FamilyMemberHistory`, `ImagingStudy`,
+`ImmunizationRecommendation`, `Appointment`, `QuestionnaireResponse`.
+
+What it would gain, measured on the owner's real chart:
+
+- **`Specimen` is the big one** — it would resolve **158 dangling references**,
+  the largest remaining gap in the export.
+- The rest add categories the record does not currently contain at all:
+  insurance, family history, imaging study metadata, vaccines due,
+  appointments, and intake/SDOH questionnaires.
+
+What it would cost:
+
+1. **A second app registration.** Epic locks an app once it is marked ready for
+   production, so these cannot be added to the existing one. A new registration
+   means a new client id and re-running the distribution wait.
+2. **The USCDI-only constraint still applies.** Registering a non-USCDI API
+   forfeits automatic client distribution, which is the only reason Stanford
+   ever received this client id without a named IT contact. Epic's form labels
+   each API — trust those labels, not this list.
+
+**No code change is needed.** All seven are already in `WANTED`; they are
+requested every run and skipped on 403. If a registration ever covers them,
+they start flowing with no edit.
+
+**What this would *not* fix.** The 403s on 30 `Encounter`, 19 `ServiceRequest`
+and 4 `Observation` ids are *not* a registration gap — those three types are
+registered and return data normally. Stanford simply refuses those particular
+records. No amount of re-registering changes that; it is the organisation's
+release policy, and the export reports it as a server notice.
 
 ## Hard-won findings — do not re-derive these
 
