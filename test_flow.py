@@ -114,6 +114,17 @@ def main() -> int:
     body = prog[0].read_text(encoding="utf-8") if prog else ""
     check("note HTML stripped to text", "Assessment:" in body and "<p>" not in body)
     check("note content intact", "A1c down from 8.1 to 7.4" in body)
+    # Epic leaves entities in the narrative — 9,511 across 131 of 138 notes in
+    # one real chart. "&lt;" mattering clinically ("temp &lt; 100"), bullets,
+    # quotes, and CJK all arrived as literal escape sequences.
+    allnotes = "\n".join(p.read_text(encoding="utf-8")
+                         for p in (OUT / "notes").glob("*.txt"))
+    check("HTML entities decoded in note text",
+          "&nbsp;" not in allnotes and "&#8226;" not in allnotes
+          and "&amp;" not in allnotes)
+    check("decoded entities became real characters",
+          "temp < 100" in allnotes and "•" in allnotes)
+    check("no non-breaking spaces left as \\xa0", "\xa0" not in allnotes)
 
     # Truncating the FHIR id to build a filename made two Epic notes collide,
     # and one silently overwrote the other. The index must match disk 1:1.
@@ -152,7 +163,10 @@ def main() -> int:
     check("counts not inflated by outcome entries",
           man["counts"].get("Patient") == 1, str(man["counts"].get("Patient")))
     notices = man.get("server_notices", [])
-    check("server notices captured", len(notices) == 2, f"got {len(notices)}")
+    # Count is not pinned: reference resolution can add its own notices when
+    # the server refuses something. What matters is that Epic's two search
+    # warnings survive deduplication.
+    check("server notices captured", len(notices) >= 2, f"got {len(notices)}")
     check("suppression warning surfaced",
           any("will not be returned" in n["message"] for n in notices))
     check("notices deduped across resource types and pages",
@@ -215,6 +229,20 @@ def main() -> int:
           "2026-06-11" in md      # ImagingStudy.started
           and "2026-07-15" in md  # MedicationDispense.whenHandedOver
           and "2026-10-02" in md)  # Appointment.start
+
+    # A category search never reaches radiology findings, and Practitioner is
+    # not patient-searchable at all — but both read fine by id. Without this
+    # the export silently omits them.
+    refobs = raw / "Observation_referenced.json"
+    check("referenced Observation recovered by direct read", refobs.exists())
+    check("recovered observation reaches the record",
+          "## Other observations" in md and "Pulmonary nodule size" in md)
+    check("non-searchable Practitioner recovered",
+          (raw / "Practitioner_referenced.json").exists())
+    check("server refusal recorded rather than passed over silently",
+          any("declined to release" in n["message"]
+              for n in man.get("server_notices", []))
+          or "Encounter" not in {t for t, _ in ex.WANTED})
 
     check("CodeableConcept falls back to coding.display, not '?'",
           "Hemoglobin A1c" in md and "| ? |" not in md)

@@ -113,6 +113,7 @@ DATA = {
         {"resourceType": "Encounter", "id": "e1",
          "type": [{"text": "Endocrinology follow-up"}],
          "period": {"start": "2026-07-14T09:30:00Z"},
+         "location": [{"location": {"reference": f"{BASE}/Location/loc-1"}}],
          "serviceProvider": {"display": "Stanford Endocrinology"}},
     ],
     ("DocumentReference", "clinical-note"): [
@@ -138,6 +139,17 @@ DATA = {
         {"resourceType": "DiagnosticReport", "id": "d1", "status": "final",
          "code": {"text": "Comprehensive metabolic panel"},
          "effectiveDateTime": "2026-07-14T10:00:00Z"},
+    ],
+    # This report points at an Observation that no category search returns and
+    # at a Practitioner that is not patient-searchable at all. Both read fine
+    # by id. Real Epic does exactly this: 118 observations and 173
+    # practitioners were reachable only this way in one live chart.
+    ("DiagnosticReport", "RAD"): [
+        {"resourceType": "DiagnosticReport", "id": "d2", "status": "final",
+         "code": {"text": "CT Chest w/o contrast"},
+         "effectiveDateTime": "2026-07-02T18:00:00Z",
+         "result": [{"reference": f"{BASE}/Observation/imaging-finding-1"}],
+         "performer": [{"reference": f"{BASE}/Practitioner/prac-1"}]},
     ],
     # Everything below was pulled and saved by the exporter but never rendered.
     # The mock never served any of it, which is why nothing caught that.
@@ -230,13 +242,37 @@ SEARCH_OUTCOME = {
     },
 }
 
-NOTE_HTML = """<div><p><b>Subjective:</b> Patient reports improved energy since the
-last visit. Adherent to metformin. Denies hypoglycemic episodes.</p>
+# Entities are left in on purpose. Real Epic notes are full of them, and the
+# escaped "&lt;" carries clinical meaning that is lost if it is not decoded.
+NOTE_HTML = """<div><p><b>Subjective:</b>&nbsp;Patient reports improved energy since the
+last visit. Adherent to metformin. Denies hypoglycemic episodes. Afebrile,
+temp &lt; 100 throughout.</p>
 <p><b>Assessment:</b> Type 2 diabetes, improving. A1c down from 8.1 to 7.4.</p>
-<p><b>Plan:</b> Continue metformin 500 mg BID. Recheck A1c in three months.
-Referral to nutrition placed.</p></div>"""
+<p><b>Plan:</b>&#8226; Continue metformin 500 mg BID.&#8226; Recheck A1c in three
+months.&#8226; Referral to nutrition &amp; diabetes education placed.</p></div>"""
 
-SUPPORTED = sorted({k[0] for k in DATA} | {"Procedure", "CareTeam", "Goal", "CarePlan"})
+SUPPORTED = sorted({k[0] for k in DATA} | {"Procedure", "CareTeam", "Goal",
+                                           "CarePlan", "Practitioner"})
+
+# Readable by id only — never returned by any patient search. Encounter is
+# here to be refused, the way Stanford refuses referenced encounters with 403.
+READ_BY_ID = {
+    ("Observation", "imaging-finding-1"): {
+        "resourceType": "Observation", "id": "imaging-finding-1", "status": "final",
+        "category": [{"coding": [{"code": "imaging"}]}],
+        "code": {"coding": [{"display": "Pulmonary nodule size"}]},
+        "effectiveDateTime": "2026-07-02T18:05:00Z",
+        "valueQuantity": {"value": 4, "unit": "mm"},
+    },
+    ("Practitioner", "prac-1"): {
+        "resourceType": "Practitioner", "id": "prac-1",
+        "name": [{"given": ["Alex"], "family": "Reyes", "prefix": ["Dr."]}],
+    },
+}
+# Encounter and Location stand in for what Stanford actually refuses: the
+# record references them, they are not searchable, and reading them by id is
+# denied. The export has to say so rather than quietly omitting them.
+FORBIDDEN_BY_ID = {"Encounter", "Location"}
 
 
 class H(BaseHTTPRequestHandler):
@@ -295,6 +331,18 @@ class H(BaseHTTPRequestHandler):
             html = bodies.get(m.group(1), NOTE_HTML)
             return self._send({"resourceType": "Binary", "contentType": "text/html",
                                "data": base64.b64encode(html.encode()).decode()})
+
+        # Direct read by id: GET [base]/Type/id
+        m = re.match(r".*/api/FHIR/R4/(\w+)/([\w.-]+)$", path)
+        if m:
+            rt, rid = m.group(1), m.group(2)
+            if rt in FORBIDDEN_BY_ID:
+                return self._send({"resourceType": "OperationOutcome", "issue": [
+                    {"severity": "error", "code": "forbidden",
+                     "details": {"text": "Not authorized for this resource."}}]}, 403)
+            hit = READ_BY_ID.get((rt, rid))
+            return self._send(hit) if hit else self._send(
+                {"resourceType": "OperationOutcome"}, 404)
 
         m = re.match(r".*/api/FHIR/R4/(\w+)$", path)
         if not m:

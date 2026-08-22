@@ -23,6 +23,7 @@ import argparse
 import base64
 import datetime as dt
 import hashlib
+import html
 import http.server
 import json
 import os
@@ -584,6 +585,13 @@ def fetch_note_text(session: requests.Session, base: str, att: dict) -> str | No
                 body = base64.b64decode(j["data"]).decode("utf-8", "replace")
         # Strip HTML/RTF wrapper down to something readable.
         body = re.sub(r"<[^>]+>", " ", body)
+        # Decode entities only after tags are gone. The other order turns
+        # "&lt;div&gt;" into a real tag that the stripper then eats, and a
+        # clinical "temp &lt; 100" into "<100 ..." that looks like markup.
+        # Epic leaves a lot of these behind: 9,511 across 131 of 138 notes in
+        # one real chart, including bullets, quotes, and CJK characters.
+        body = html.unescape(body)
+        body = body.replace("\xa0", " ")  # decoded &nbsp; is still not a space
         body = re.sub(r"[ \t]+", " ", body)
         body = re.sub(r"\n\s*\n\s*\n+", "\n\n", body)
         return body.strip()
@@ -593,6 +601,126 @@ def fetch_note_text(session: requests.Session, base: str, att: dict) -> str | No
         # the record; a missing one has to be visible.
         log(f"note fetch failed ({type(e).__name__}: {str(e)[:120]})")
         return None
+
+
+# Types worth chasing when a pulled resource points at something the search
+# did not return. Practitioner/Location/Organization are who and where; the
+# Observations are mostly radiology findings hanging off DiagnosticReports,
+# which no category search reaches. Encounter and Specimen are deliberately
+# absent: Stanford answers 403 for both, so asking only wastes requests.
+RESOLVE_TYPES = ("Observation", "Practitioner", "Medication", "Location",
+                 "Organization", "PractitionerRole", "MedicationRequest",
+                 "ServiceRequest", "Condition", "DiagnosticReport", "Procedure")
+RESOLVE_CAP = 1200
+# Resolving one wave surfaces the next: a recovered PractitionerRole points at
+# a Practitioner, a recovered MedicationRequest at a Medication. Two rounds
+# closed the live chart; the bound stops a pathological chain.
+RESOLVE_ROUNDS = 3
+
+
+def dangling_references(collected: dict[str, list[dict]]) -> dict[str, set[str]]:
+    """Ids referenced by what we pulled but absent from it."""
+    have: dict[str, set[str]] = {}
+    for rs in collected.values():
+        for r in rs:
+            if r.get("id"):
+                have.setdefault(r.get("resourceType", ""), set()).add(r["id"])
+    want: dict[str, set[str]] = {}
+
+    def walk(o: Any) -> None:
+        if isinstance(o, dict):
+            ref = o.get("reference")
+            if isinstance(ref, str):
+                m = re.match(r"^(?:.*/)?([A-Z][A-Za-z]+)/([^/?]+)$", ref)
+                if m:
+                    t, i = m.groups()
+                    if t in RESOLVE_TYPES and i not in have.get(t, set()):
+                        want.setdefault(t, set()).add(i)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for rs in collected.values():
+        walk(rs)
+    return want
+
+
+def resolve_references(session: requests.Session, base: str, raw: Path,
+                       collected: dict[str, list[dict]],
+                       notices: dict[str, list[str]]) -> None:
+    """Fetch resources referenced by the record but not returned by search.
+
+    A category search for Observations never reaches the radiology findings
+    that DiagnosticReports point at, and reference data like Practitioner is
+    not patient-searchable at all — but both read fine by id. Without this the
+    export silently omits them and shows bare ids where a name belongs.
+    """
+    tried: set[tuple[str, str]] = set()
+    for rnd in range(1, RESOLVE_ROUNDS + 1):
+        want = {t: ids - {i for tt, i in tried if tt == t}
+                for t, ids in dangling_references(collected).items()}
+        want = {t: ids for t, ids in want.items() if ids}
+        if not want:
+            break
+        total = sum(len(v) for v in want.values())
+        log(f"resolving {total} referenced resources the searches did not "
+            f"return (round {rnd}) ...")
+        for t, ids in want.items():
+            tried |= {(t, i) for i in ids}
+        _resolve_round(session, base, raw, collected, notices, want, rnd)
+
+
+def _resolve_round(session: requests.Session, base: str, raw: Path,
+                   collected: dict[str, list[dict]],
+                   notices: dict[str, list[str]],
+                   want: dict[str, set[str]], rnd: int) -> None:
+    for rtype in RESOLVE_TYPES:
+        ids = sorted(want.get(rtype, ()))
+        if not ids:
+            continue
+        if len(ids) > RESOLVE_CAP:
+            log(f"{rtype}: {len(ids)} dangling refs exceeds the {RESOLVE_CAP} cap")
+            notices.setdefault(
+                f"warning: only {RESOLVE_CAP} of {len(ids)} referenced {rtype} "
+                f"resources were retrieved", []).append(rtype)
+            ids = ids[:RESOLVE_CAP]
+        got, denied = [], 0
+        for i in ids:
+            url = f"{base.rstrip('/')}/{rtype}/{urllib.parse.quote(i, safe='')}"
+            try:
+                r = session.get(url, timeout=120)
+            except Exception as e:  # noqa: BLE001
+                log(f"{rtype}/{i[:12]}: {type(e).__name__}")
+                continue
+            if r.status_code in (401, 403):
+                denied += 1
+                continue
+            if r.status_code >= 400:
+                continue
+            try:
+                res = r.json()
+            except ValueError:
+                continue
+            if res.get("resourceType") == rtype:
+                got.append(res)
+        if denied:
+            log(f"{rtype}: {denied} referenced resources withheld by the server")
+            notices.setdefault(
+                f"warning: the server declined to release {denied} referenced "
+                f"{rtype} resources that appear in this record", []).append(rtype)
+        if got:
+            log(f"{rtype}: recovered {len(got)} by direct read")
+            path = raw / f"{rtype}_referenced.json"
+            prior = []
+            if path.exists():  # later rounds append rather than replace
+                prior = [r for r in json.loads(path.read_text(encoding="utf-8"))
+                         if r.get("resourceType") == rtype]
+            seen_ids = {r.get("id") for r in prior}
+            merged = prior + [r for r in got if r.get("id") not in seen_ids]
+            save_json(path, merged)
+            collected.setdefault(rtype, []).extend(got)
 
 
 def cmd_pull(args: argparse.Namespace) -> None:
@@ -644,6 +772,9 @@ def cmd_pull(args: argparse.Namespace) -> None:
         log(f"{label}: {len(found)}")
         save_json(raw / f"{label}.json", found)
         collected.setdefault(rtype, []).extend(found)
+
+    if not getattr(args, "no_resolve_refs", False):
+        resolve_references(s, base, raw, collected, notices)
 
     # Clinical notes: resolve the attachment bodies, which is where the
     # actual narrative lives.
@@ -1072,6 +1203,23 @@ def cmd_render(args: argparse.Namespace) -> None:
         for g in sorted(goals, key=lambda x: x.get("startDate", ""), reverse=True)
     ))
 
+    # Observations recovered by following references — mostly radiology
+    # findings hanging off DiagnosticReports, which no category search returns.
+    extra_obs = load("Observation_referenced")
+    extra_rows = []
+    for o in sorted(extra_obs, key=_obs_date, reverse=True):
+        val = _obs_value(o) or _concept_text(o.get("dataAbsentReason")) or ""
+        extra_rows.append(f"| {_obs_date(o)} | {_concept_text(o.get('code')) or '?'} "
+                          f"| {val} | {_ref_range(o)} |")
+    if extra_rows:
+        md += ["## Other observations",
+               "",
+               "_Referenced by reports in this record but not returned by the "
+               "category searches; retrieved individually._",
+               "",
+               "| Date | Observation | Value | Reference range |",
+               "|---|---|---|---|"] + extra_rows + [""]
+
     # No real Epic response has been seen for these yet — the sandbox returns
     # none of them — so they get a generic date/label/status row rather than a
     # bespoke layout guessing at field shapes. Refine once real data lands.
@@ -1235,6 +1383,10 @@ def main() -> None:
                              "README before using this with automatic client "
                              "distribution")
         sp.add_argument("--timeout", type=int, default=300)
+        sp.add_argument("--no-resolve-refs", action="store_true",
+                        help="skip fetching resources the record references "
+                             "but the searches did not return (radiology "
+                             "observations, clinician and location names)")
 
     li = sub.add_parser("login", help="run the SMART/PKCE browser login")
     auth_args(li)
