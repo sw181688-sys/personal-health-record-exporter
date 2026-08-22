@@ -105,8 +105,10 @@ def main() -> int:
     check("pagination followed (5 labs across 3 pages)", len(labs) == 5, f"got {len(labs)}")
     meds = json.loads((raw / "MedicationRequest.json").read_text(encoding="utf-8"))
     check("medications pulled", len(meds) == 2, f"got {len(meds)}")
+    # ServiceRequest is in WANTED but absent from the mock's CapabilityStatement,
+    # so capability filtering should drop it before any request is made.
     check("unsupported types skipped cleanly",
-          not (raw / "Device.json").exists())
+          not (raw / "ServiceRequest.json").exists())
     check("note body fetched from Binary", man.get("notes") == 3, str(man.get("notes")))
     prog = [p for p in (OUT / "notes").glob("*.txt") if "progress" in p.name]
     body = prog[0].read_text(encoding="utf-8") if prog else ""
@@ -196,6 +198,24 @@ def main() -> int:
     ]:
         check(f"{heading.lower()} rendered", f"## {heading}" in md and needle in md)
 
+    # Types beyond the original set. Each labels and dates itself with a
+    # different field, which is why the renderer is generic rather than bespoke.
+    for heading, needle in [
+        ("Implanted devices", "Medtronic Azure XT DR MRI"),
+        ("Insurance coverage", "PPO"),
+        ("Family history", "Mother"),
+        ("Imaging studies", "CT Abdomen"),
+        ("Medications dispensed", "Metformin 500 mg tablet"),
+        ("Appointments", "Endocrinology follow-up"),
+    ]:
+        check(f"{heading.lower()} rendered", f"## {heading}" in md and needle in md)
+    check("device UDI and manufacturer surfaced",
+          "UDI 00643169007222" in md and "Medtronic," in md)
+    check("generic renderer finds each type's own date field",
+          "2026-06-11" in md      # ImagingStudy.started
+          and "2026-07-15" in md  # MedicationDispense.whenHandedOver
+          and "2026-10-02" in md)  # Appointment.start
+
     check("CodeableConcept falls back to coding.display, not '?'",
           "Hemoglobin A1c" in md and "| ? |" not in md)
     check("lab reference range rendered", "4.0–5.6 %" in md)
@@ -225,10 +245,11 @@ def main() -> int:
     check("notice list not fragmented into one <ul> each",
           notice_html.count("<ul>") == 1, f"{notice_html.count('<ul>')} <ul>")
     # The mangling signature is a tag spliced into the middle of a word, e.g.
-    # "CarePlan</em>assessplan". Assert the shape, not one specific label,
-    # since the affects list is truncated for readability.
+    # "CarePlan</em>assessplan". Assert that shape rather than naming a label:
+    # the affects list is truncated for readability, so which labels survive
+    # depends on how many resource types WANTED happens to contain.
     check("underscored FHIR labels not mangled by emphasis",
-          "Condition_problemlistitem" in notice_html
+          re.search(r"[A-Za-z]+_[a-z]+", notice_html) is not None
           and not re.search(r"[A-Za-z0-9]</?em>[A-Za-z0-9]", notice_html))
     check("no unclosed emphasis left in HTML", "_<" not in notice_html
           and not re.search(r"_\s*</p>", notice_html))

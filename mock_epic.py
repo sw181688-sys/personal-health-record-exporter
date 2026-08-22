@@ -173,6 +173,37 @@ DATA = {
          "startDate": "2026-03-01",
          "description": {"text": "Walk 30 minutes daily"}},
     ],
+    # Types beyond the original set. Each one labels and dates itself with a
+    # different field, which is the whole reason the renderer is generic.
+    ("Device", ""): [
+        {"resourceType": "Device", "id": "dev1", "status": "active",
+         "deviceName": [{"name": "Medtronic Azure XT DR MRI"}],
+         "manufacturer": "Medtronic", "model": "W3DR01",
+         "udiCarrier": [{"deviceIdentifier": "00643169007222"}]},
+    ],
+    ("Coverage", ""): [
+        {"resourceType": "Coverage", "id": "cov1", "status": "active",
+         "type": {"text": "PPO"}, "period": {"start": "2026-01-01"}},
+    ],
+    ("FamilyMemberHistory", ""): [
+        {"resourceType": "FamilyMemberHistory", "id": "fh1", "status": "completed",
+         "relationship": {"text": "Mother"}, "date": "2024-05-02",
+         "condition": [{"code": {"text": "Type 2 diabetes mellitus"}}]},
+    ],
+    ("ImagingStudy", ""): [
+        {"resourceType": "ImagingStudy", "id": "img1", "status": "available",
+         "started": "2026-06-11T17:15:00Z", "description": "CT Abdomen w/ contrast"},
+    ],
+    ("MedicationDispense", ""): [
+        {"resourceType": "MedicationDispense", "id": "md1", "status": "completed",
+         "medicationCodeableConcept": {"text": "Metformin 500 mg tablet"},
+         "whenHandedOver": "2026-07-15T16:40:00Z"},
+    ],
+    ("Appointment", ""): [
+        {"resourceType": "Appointment", "id": "ap1", "status": "booked",
+         "serviceType": [{"text": "Endocrinology follow-up"}],
+         "start": "2026-10-02T16:00:00Z"},
+    ],
 }
 
 # Epic attaches an OperationOutcome to every search bundle, flagged

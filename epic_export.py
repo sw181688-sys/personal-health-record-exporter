@@ -67,6 +67,22 @@ WANTED: list[tuple[str, dict[str, str]]] = [
     ("CarePlan", {"category": "assess-plan"}),
     ("CareTeam", {}),
     ("Goal", {}),
+    # --- Beyond the original set -------------------------------------------
+    # All of these are advertised by Stanford and are patient-searchable. They
+    # are only reachable if the matching API is also enabled on the app's Epic
+    # registration; without it the server answers 403, which cmd_pull logs and
+    # skips. Listing them here therefore costs nothing and does NOT affect
+    # automatic-distribution eligibility — that is decided by the registration,
+    # not by what the client asks for.
+    ("Device", {}),                    # implanted devices, with UDI
+    ("Coverage", {}),                  # health insurance on file
+    ("FamilyMemberHistory", {}),
+    ("ImagingStudy", {}),              # study metadata, never the images
+    ("MedicationDispense", {}),        # what was actually dispensed
+    ("ImmunizationRecommendation", {}),  # vaccines due
+    ("ServiceRequest", {}),            # orders and referrals
+    ("Appointment", {}),
+    ("QuestionnaireResponse", {}),     # intake forms, SDOH screenings
 ]
 
 # Note: offline_access is deliberately NOT requested by default.
@@ -783,6 +799,53 @@ def _obs_date(o: dict) -> str:
     )
 
 
+# Epic labels and dates each resource type with whichever field that type
+# happens to use, so these are tried in order of specificity.
+_LABEL_KEYS = ("code", "vaccineCode", "medicationCodeableConcept", "type",
+               "serviceType", "relationship", "description", "class", "category")
+_DATE_KEYS = ("effectiveDateTime", "performedDateTime", "occurrenceDateTime",
+              "authoredOn", "authored", "whenHandedOver", "recordedDate",
+              "created", "date", "started", "start")
+
+
+def _resource_label(r: dict) -> str:
+    for k in _LABEL_KEYS:
+        v = r.get(k)
+        if isinstance(v, list):
+            v = v[0] if v else None
+        if isinstance(v, dict):
+            t = _concept_text(v)
+            if t:
+                return t
+        elif isinstance(v, str) and v:
+            return v
+    for dn in r.get("deviceName", []) or []:   # Device keeps its name apart
+        if dn.get("name"):
+            return str(dn["name"])
+    return str((r.get("medicationReference") or {}).get("display", ""))
+
+
+def _resource_when(r: dict) -> str:
+    for k in _DATE_KEYS:
+        v = r.get(k)
+        if isinstance(v, str) and v:
+            return _local_date(v)
+    for k in ("performedPeriod", "effectivePeriod", "period", "servicedPeriod"):
+        p = r.get(k) or {}
+        if p.get("start"):
+            return _local_date(p["start"])
+    return ""
+
+
+def _device_extra(r: dict) -> str:
+    """UDI and manufacturer are the point of an implanted-device record."""
+    bits = [str(r.get("manufacturer", "")), str(r.get("model", ""))]
+    udi = (r.get("udiCarrier") or [{}])[0].get("deviceIdentifier", "")
+    if udi:
+        bits.append(f"UDI {udi}")
+    return ", ".join(b for b in bits if b)
+
+
 def _ref_range(o: dict) -> str:
     """A lab value without its range is hard for a patient to act on."""
     for r in o.get("referenceRange", []) or []:
@@ -1008,6 +1071,31 @@ def cmd_render(args: argparse.Namespace) -> None:
         + (f"  _({g.get('lifecycleStatus','')})_" if g.get("lifecycleStatus") else "")
         for g in sorted(goals, key=lambda x: x.get("startDate", ""), reverse=True)
     ))
+
+    # No real Epic response has been seen for these yet — the sandbox returns
+    # none of them — so they get a generic date/label/status row rather than a
+    # bespoke layout guessing at field shapes. Refine once real data lands.
+    for stem, heading in [
+        ("Device", "Implanted devices"),
+        ("Coverage", "Insurance coverage"),
+        ("FamilyMemberHistory", "Family history"),
+        ("ImagingStudy", "Imaging studies"),
+        ("MedicationDispense", "Medications dispensed"),
+        ("ImmunizationRecommendation", "Vaccines due"),
+        ("ServiceRequest", "Orders and referrals"),
+        ("Appointment", "Appointments"),
+        ("QuestionnaireResponse", "Questionnaires"),
+    ]:
+        rows = load(stem)
+        section(heading, (
+            "- "
+            + (f"{_resource_when(r)} — " if _resource_when(r) else "")
+            + (_resource_label(r) or "(unlabelled)")
+            + (f" — {_device_extra(r)}"
+               if stem == "Device" and _device_extra(r) else "")
+            + (f"  _({r.get('status','')})_" if r.get("status") else "")
+            for r in sorted(rows, key=_resource_when, reverse=True)
+        ))
 
     section("Clinical notes", (
         f"- {n['date']} — {n['title']} → `notes/{n['file']}` ({n['chars']:,} chars)"
