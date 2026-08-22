@@ -15,14 +15,15 @@ durable local copy of notes, labs, meds, problems, allergies, and visit history
 
 ## Current state
 
-Code is **written, tested, and validated against Epic's sandbox end to end**.
-It has not yet been run against Stanford — i.e. never against real chart data.
+Code is **in production use**: a full export has been run against Stanford
+against the owner's real chart, producing 3,527 resources and 138 clinical
+notes. Sandbox and CI both stay green.
 
 - `epic_export.py` — the CLI. Subcommands: `find-endpoint`, `login`, `pull`,
   `render`, `all`.
 - `mock_epic.py` — a local fake Epic server (SMART discovery, real PKCE
   verification, CapabilityStatement, paginated bundles, `Binary`-backed note).
-- `test_flow.py` — end-to-end test against the mock. **47 checks, all passing.**
+- `test_flow.py` — end-to-end test against the mock. **76 checks, all passing.**
   Run with `python test_flow.py`. Keep it green.
 - `index.html` / `README.md` / `PUBLISHING.md` — the public documentation page
   required by Epic's registration form, and how to publish it.
@@ -38,12 +39,15 @@ It has not yet been run against Stanford — i.e. never against real chart data.
    `/terms`. Both pasted into the Epic form.
 3. ~~Validate against Epic's sandbox~~ — full `all` run against test patient
    `fhircamila`, pulling 17 resource types, 4 notes, and 254 vitals.
+4. ~~Mark the app Ready for Production~~ — done; auto-distribution worked and
+   Stanford accepted the production client id with no manual step.
+5. ~~Run against Stanford~~ — 3,527 resources, 138 notes, 20 rendered sections.
 
 ### What's left
 
-1. Mark the app **Ready for Production** in Epic's portal; the production
-   client id takes about an hour to propagate.
-2. Run against Stanford for real.
+Nothing required. The one open option is registering the APIs that currently
+return 403 (see below) — which needs a **second app registration**, because
+Epic locks an app once it is marked ready for production.
 
 ## Hard-won findings — do not re-derive these
 
@@ -93,6 +97,38 @@ will not be returned"*, which is the server telling you the export is
 **incomplete**. They're deduped into `manifest.json` as `server_notices` and
 rendered as an "About this export" section. The mock now emits them too — it
 didn't, which is exactly why this reached a live server undetected.
+
+**A category search cannot reach every Observation.** The tool searches
+`laboratory`, `vital-signs` and `social-history`. Radiology findings are in
+none of those, so 114 Observations referenced by the owner's `DiagnosticReport`
+records were invisible to every search — but read fine by id. Likewise
+`Practitioner`, `Location`, `Organization` and `PractitionerRole` are not
+patient-searchable at all. `resolve_references()` walks every `reference` in
+the export and fetches what is missing, in up to `RESOLVE_ROUNDS` passes
+because each wave surfaces the next (a recovered `PractitionerRole` points at
+a `Practitioner`). This recovered **637 resources, 2,890 → 3,527**, on the
+live chart. Do not remove it in the belief that searching covers the record.
+
+**Epic leaves HTML entities in note text.** Stripping `<tags>` is not enough:
+the owner's notes held 9,511 entities across 131 of 138 files — `&nbsp;`,
+`&#8226;` bullets, CJK as numeric escapes, and 133 `&lt;`/`&gt;` where a note
+saying "temp &lt; 100" had lost its comparison operator. Decode **after**
+stripping tags, never before: the other order turns `&lt;div&gt;` into a real
+tag the stripper eats.
+
+**Stanford refuses some of what its own data references.** 403 on 158
+`Specimen`, 30 `Encounter`, 19 `ServiceRequest` and 4 `Observation` ids that
+appear as references in the export. That is the concrete form of Epic's
+boilerplate "may not contain the entire record" warning. These are recorded as
+`server_notices` and rendered — never silently dropped.
+
+**These APIs are not on the current registration** (403 on every run):
+`Coverage`, `FamilyMemberHistory`, `ImagingStudy`, `ImmunizationRecommendation`,
+`Appointment`, `QuestionnaireResponse`, `Specimen`. They are listed in `WANTED`
+anyway — an unregistered type is logged and skipped, and what the client asks
+for does **not** affect auto-distribution eligibility. Only the registration
+does. Adding them requires a second app registration, and the USCDI-only rule
+still applies to whatever is chosen.
 
 **`Binary` must be in the app's registered API list.** Clinical note narrative
 lives in `DocumentReference` attachments that resolve through `Binary`. Without
