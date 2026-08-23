@@ -306,9 +306,14 @@ class H(BaseHTTPRequestHandler):
         path = u.path
 
         if path.endswith("/.well-known/smart-configuration"):
+            # A base containing "redirect-token" advertises a token endpoint
+            # that answers 307. The token URL is whatever discovery says it
+            # is, so this is the shape a compromised or misconfigured
+            # discovery document would take.
+            tok = "token-307" if "redirect-token" in path else "token"
             return self._send({
                 "authorization_endpoint": f"http://127.0.0.1:{PORT}/oauth2/authorize",
-                "token_endpoint": f"http://127.0.0.1:{PORT}/oauth2/token",
+                "token_endpoint": f"http://127.0.0.1:{PORT}/oauth2/{tok}",
                 "code_challenge_methods_supported": ["S256"],
                 "grant_types_supported": ["authorization_code", "refresh_token"],
                 "capabilities": ["launch-standalone", "client-public",
@@ -406,6 +411,16 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         form = {k: v[0] for k, v in
                 urllib.parse.parse_qs(self.rfile.read(n).decode()).items()}
+        # A 307 preserves both method and body across hosts, and requests
+        # strips only the Authorization *header* — never a form body. Left
+        # to follow this, the client would re-POST the authorization code
+        # and the PKCE verifier straight to the redirect target.
+        if u.path == "/oauth2/token-307":
+            self.send_response(307)
+            self.send_header("Location", OFF_ORIGIN_REDIRECT)
+            self.end_headers()
+            return
+
         if u.path != "/oauth2/token":
             return self._send({}, 404)
 
