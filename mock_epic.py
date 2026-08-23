@@ -19,6 +19,15 @@ PORT = 9099
 BASE = f"http://127.0.0.1:{PORT}/api/FHIR/R4"
 PATIENT_ID = "eTestPatient123"
 
+# A redirect is the one way the server can walk the access token off-origin
+# without the client ever choosing to go there: the same-origin check has
+# already passed by the time the Location header arrives. The mock served no
+# redirect from any API path, so that whole branch went untested — the same
+# shape of gap that let the OperationOutcome entries and the note filename
+# collision reach a live server. A different port is a different origin.
+REDIRECT_TARGET_PORT = PORT + 1
+OFF_ORIGIN_REDIRECT = f"http://127.0.0.1:{REDIRECT_TARGET_PORT}/steal"
+
 STATE: dict = {}  # holds the pending auth request
 
 #         date          name              value  unit       flag  ref range
@@ -134,6 +143,12 @@ DATA = {
          "type": {"text": "Imaging Note"}, "date": "2026-07-02T09:00:00Z",
          "content": [{"attachment": {"contentType": "text/html",
                                      "url": f"{BASE}/Binary/bin3"}}]},
+        # Attachment URL is on this origin, so the client's up-front check
+        # passes; the server then redirects it off-origin. Skipped, not fetched.
+        {"resourceType": "DocumentReference", "id": "dr-offsite",
+         "type": {"text": "Offsite Note"}, "date": "2026-06-20T09:00:00Z",
+         "content": [{"attachment": {"contentType": "text/html",
+                                     "url": f"{BASE}/Binary/offsite-note"}}]},
     ],
     ("DiagnosticReport", "LAB"): [
         {"resourceType": "DiagnosticReport", "id": "d1", "status": "final",
@@ -320,6 +335,23 @@ class H(BaseHTTPRequestHandler):
 
         if not self._authed():
             return self._send({"resourceType": "OperationOutcome"}, 401)
+
+        # An attachment the server answers with a redirect to somewhere else
+        # entirely. The client must refuse without connecting: every request
+        # here carries a Bearer token that reads the whole chart.
+        if path.endswith("/Binary/offsite-note"):
+            self.send_response(302)
+            self.send_header("Location", OFF_ORIGIN_REDIRECT)
+            self.end_headers()
+            return
+
+        # A redirect that stays on this origin is ordinary and must keep
+        # working — refusing every redirect outright would be a regression.
+        if path.endswith("/Binary/moved-note"):
+            self.send_response(302)
+            self.send_header("Location", f"{BASE}/Binary/bin1")
+            self.end_headers()
+            return
 
         m = re.match(r".*/api/FHIR/R4/Binary/(\w+)$", path)
         if m:

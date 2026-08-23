@@ -23,7 +23,7 @@ notes. Sandbox and CI both stay green.
   `render`, `all`.
 - `mock_epic.py` — a local fake Epic server (SMART discovery, real PKCE
   verification, CapabilityStatement, paginated bundles, `Binary`-backed note).
-- `test_flow.py` — end-to-end test against the mock. **76 checks, all passing.**
+- `test_flow.py` — end-to-end test against the mock. **82 checks, all passing.**
   Run with `python test_flow.py`. Keep it green.
 - `index.html` / `README.md` / `PUBLISHING.md` — the public documentation page
   required by Epic's registration form, and how to publish it.
@@ -167,6 +167,21 @@ still applies to whatever is chosen.
 lives in `DocumentReference` attachments that resolve through `Binary`. Without
 it, notes come back as empty references.
 
+**A redirect gets past `same_origin()`.** That check runs on URLs the tool
+*decides* to fetch. A `302` is chosen by the server after the check has already
+passed, so it was the one path that could walk the token off-origin on its own.
+What actually held the line was `requests` dropping the `Authorization` header
+when the host changes — real behaviour (verified against 2.34.2), but a library
+default this repo neither asserted nor controlled, and one that says nothing
+about a different *port* on the same host, which `same_origin()` does treat as
+foreign. The token never leaked; the off-origin server was still contacted, so
+it learned the machine exists and is pulling records. `get_contained()` now
+follows same-origin hops itself and refuses anything else **without
+connecting**. Do not replace it with a bare `session.get()`. The token
+endpoint POSTs use `allow_redirects=False` for a related reason: header
+stripping does not apply to a form body, so a `307` would have re-POSTed the
+authorization code and PKCE verifier to the redirect target.
+
 ## Conventions
 
 - Python 3.11+, stdlib-first. Only `requests` and `cryptography` as deps.
@@ -180,7 +195,9 @@ it, notes come back as empty references.
   toggles the read-only bit and does **not** restrict who can read the file.
 - The access token must never leave the provider's origin. Server-supplied
   URLs (pagination `next`, `Binary` attachments) go through `same_origin()`
-  first; the token is a session header and would ride along.
+  first; the token is a session header and would ride along. Authenticated
+  `GET`s go through `get_contained()`, never `session.get()` directly — see
+  the redirect finding below.
 - `.gitignore` excludes all record output and credentials. **Verify
   `git status --short` before any commit** — a public commit containing real
   chart data is very hard to undo.

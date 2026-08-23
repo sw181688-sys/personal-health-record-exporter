@@ -337,6 +337,61 @@ def main() -> int:
     check("same-origin URLs still allowed",
           ex.same_origin(f"{mock_epic.BASE}/Patient?x=1", mock_epic.BASE)
           and not ex.same_origin("https://evil.example/x", mock_epic.BASE))
+    # A Location header can hold anything; an out-of-range port made .port
+    # raise ValueError and took the export down with it.
+    check("unparseable redirect target is not same-origin, and does not raise",
+          ex.same_origin("http://127.0.0.1:99999/x", mock_epic.BASE) is False)
+
+    # Everything above tests URLs the client CHOSE to fetch. A redirect is
+    # chosen by the server after that check has already passed, so it is the
+    # one path that can walk the token off-origin on its own. Containment here
+    # was resting entirely on requests dropping the Authorization header
+    # across hosts — real behaviour, but nothing this repo asserts or controls.
+    redirected: dict = {}
+
+    class RedirectTarget(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            redirected["hit"] = True
+            redirected["auth"] = self.headers.get("Authorization")
+            b = b'{"resourceType":"Binary","contentType":"text/plain","data":""}'
+            self.send_response(200); self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+        def log_message(self, *a): pass
+
+    threading.Thread(
+        target=HTTPServer(("127.0.0.1", mock_epic.REDIRECT_TARGET_PORT),
+                          RedirectTarget).serve_forever, daemon=True).start()
+    time.sleep(0.3)
+
+    msess = requests.Session()
+    msess.headers.update({"Authorization": "Bearer TOKEN-OK"})
+    off = ex.fetch_note_text(msess, mock_epic.BASE,
+                             {"url": f"{mock_epic.BASE}/Binary/offsite-note",
+                              "contentType": "text/html"})
+    check("note body refused when the server redirects off-origin", off is None)
+    # Stronger than "the token was stripped": the request is never made at all,
+    # so the other origin learns nothing — not the token, not that we exist.
+    check("off-origin redirect target never contacted",
+          not redirected.get("hit"), str(redirected))
+
+    # Refusing every redirect would be a regression, not a fix.
+    moved = ex.fetch_note_text(msess, mock_epic.BASE,
+                               {"url": f"{mock_epic.BASE}/Binary/moved-note",
+                                "contentType": "text/html"})
+    check("same-origin redirect still followed",
+          bool(moved) and "Assessment:" in moved, (moved or "")[:40])
+
+    # The same guard has to hold on the search path, where the token is also
+    # attached and the response is a whole page of records.
+    _, rwarns = ex.fetch_all(msess, mock_epic.BASE, "Binary/offsite-note", {})
+    check("redirected search reports incompleteness rather than failing quiet",
+          any("another origin" in w for w in rwarns), str(rwarns))
+
+    # A pull must not silently drop a note it refused: the DocumentReference
+    # for the offsite attachment is in the mock's search results, so the run
+    # in section 3 already exercised this path end to end.
+    check("refused attachment left the other notes intact",
+          man.get("notes") == 3, str(man.get("notes")))
 
     print("\n8. record HTML escapes server-controlled text")
     ev = Path("/tmp/record-test-xss"); shutil.rmtree(ev, ignore_errors=True)

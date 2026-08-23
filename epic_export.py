@@ -298,13 +298,21 @@ def _self_signed_cert(dirpath: Path) -> tuple[Path, Path]:
         )
         .sign(k, hashes.SHA256())
     )
-    key.write_bytes(
-        k.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
+    # Create the key owner-only rather than writing it and restricting after:
+    # on POSIX the file would otherwise sit at the umask default (usually
+    # world-readable) for the moment in between. save_json() takes the same
+    # care with the token. The mode argument is a no-op on Windows, where
+    # lock_down() below is what actually restricts access — but there the file
+    # inherits the ACL state_dir() already applied to .auth/.
+    fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(
+            k.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
         )
-    )
     lock_down(key)
     cert.write_bytes(crt.public_bytes(serialization.Encoding.PEM))
     return cert, key
@@ -396,6 +404,11 @@ def do_login(args: argparse.Namespace) -> dict:
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=60,
+        # requests strips the Authorization *header* across hosts, but not a
+        # form body: on a 307/308 it would re-POST the authorization code and
+        # PKCE verifier to the redirect target. A token endpoint has no reason
+        # to redirect, so refuse rather than rely on the status code sent.
+        allow_redirects=False,
     )
     if tr.status_code != 200:
         die(f"token exchange failed ({tr.status_code}): {tr.text[:500]}")
@@ -435,6 +448,7 @@ def load_tokens(out: Path) -> dict:
                 "client_id": tok["_client_id"],
             },
             timeout=60,
+            allow_redirects=False,  # the refresh token is in the body; see do_login
         )
         if r.status_code == 200:
             new = r.json()
@@ -463,7 +477,58 @@ def same_origin(url: str, base: str) -> bool:
         p = urllib.parse.urlparse(u)
         return (p.scheme, (p.hostname or "").lower(),
                 p.port or (443 if p.scheme == "https" else 80))
-    return parts(url) == parts(base)
+    try:
+        return parts(url) == parts(base)
+    except ValueError:
+        # .port raises on an out-of-range port. Redirect targets reach here
+        # now, and a Location header can hold anything at all — an unparseable
+        # one is not our origin, and is not worth crashing an export over.
+        return False
+
+
+# Redirects are rare on Epic's API but legal, and a chain has to end somewhere.
+MAX_REDIRECTS = 5
+
+
+def get_contained(session: requests.Session, url: str, base: str,
+                  **kw: Any) -> "requests.Response | None":
+    """GET that will not let the access token follow a redirect off-origin.
+
+    same_origin() vets the URLs this tool decides to fetch. A redirect is
+    chosen by the server *after* that check has already passed, so it is the
+    one path that can walk the token off-origin without the client ever
+    deciding to go there. requests happens to drop the Authorization header
+    when the host changes, and that — not anything here — is what has been
+    holding the line. It is an implicit library behaviour this code would
+    rather enforce itself, and it does not cover a redirect to a different
+    port on the same host, which same_origin() does treat as foreign.
+
+    Same-origin hops are followed exactly as before, so nothing that works
+    against Epic stops working. Anything else returns None without connecting
+    to the redirect target at all, and the caller records the gap.
+    """
+    seen: set[str] = set()
+    for _ in range(MAX_REDIRECTS):
+        r = session.get(url, allow_redirects=False, **kw)
+        if r.status_code not in (301, 302, 303, 307, 308):
+            return r
+        loc = r.headers.get("Location")
+        if not loc:
+            return r
+        nxt = urllib.parse.urljoin(url, loc)
+        if not same_origin(nxt, base):
+            log(f"refusing a redirect to "
+                f"{urllib.parse.urlparse(nxt).netloc or loc[:60]!r} — the "
+                f"access token would have gone with it")
+            return None
+        if nxt in seen:
+            log(f"redirect loop at {nxt}; giving up")
+            return None
+        seen.add(nxt)
+        url = nxt
+        kw.pop("params", None)  # the redirect target carries its own query
+    log(f"more than {MAX_REDIRECTS} redirects; giving up")
+    return None
 
 
 def outcome_issues(oo: dict) -> list[str]:
@@ -509,8 +574,15 @@ def fetch_all(session: requests.Session, base: str, rtype: str,
                 f"after {len(resources)} records ({reason})")
             break
         seen_urls.add(url)
-        r = session.get(url, params=params if first else None, timeout=120)
+        r = get_contained(session, url, base,
+                          params=params if first else None, timeout=120)
         first = False
+        if r is None:
+            warnings.append(
+                f"warning: {rtype} may be incomplete — the server redirected "
+                f"to another origin after {len(resources)} records and the "
+                f"request was refused")
+            return resources, warnings
         if r.status_code in (401, 403):
             raise PermissionError(f"{rtype}: {r.status_code}")
         if r.status_code == 404:
@@ -575,8 +647,9 @@ def fetch_note_text(session: requests.Session, base: str, att: dict) -> str | No
     ctype = att.get("contentType", "")
     accept = "text/plain" if "text" in ctype or "rtf" in ctype else "application/fhir+json"
     try:
-        r = session.get(url, headers={"Accept": accept}, timeout=120)
-        if r.status_code >= 400:
+        r = get_contained(session, url, base,
+                          headers={"Accept": accept}, timeout=120)
+        if r is None or r.status_code >= 400:
             return None
         body = r.text
         if body.lstrip().startswith("{"):
@@ -690,9 +763,11 @@ def _resolve_round(session: requests.Session, base: str, raw: Path,
         for i in ids:
             url = f"{base.rstrip('/')}/{rtype}/{urllib.parse.quote(i, safe='')}"
             try:
-                r = session.get(url, timeout=120)
+                r = get_contained(session, url, base, timeout=120)
             except Exception as e:  # noqa: BLE001
                 log(f"{rtype}/{i[:12]}: {type(e).__name__}")
+                continue
+            if r is None:  # redirected off-origin; refused before connecting
                 continue
             if r.status_code in (401, 403):
                 denied += 1
