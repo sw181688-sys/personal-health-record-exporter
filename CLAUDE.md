@@ -47,12 +47,16 @@ notes. Sandbox and CI both stay green.
 
 Nothing required. The tool does what it was built to do.
 
-### Possible future enhancement — register the seven 403 APIs
+### Possible future enhancement — register the seven missing APIs
 
-**Not started, and deliberately deferred.** Seven APIs return 403 on every run
-because they are absent from the app registration, not because of any code
-problem: `Specimen`, `Coverage`, `FamilyMemberHistory`, `ImagingStudy`,
+**Not started, and deliberately deferred.** Six APIs are requested every run and
+answer 403 because they are absent from the app registration, not because of any
+code problem: `Coverage`, `FamilyMemberHistory`, `ImagingStudy`,
 `ImmunizationRecommendation`, `Appointment`, `QuestionnaireResponse`.
+
+`Specimen` is the seventh gap but is **not** one of them — it is not in `WANTED`
+and is deliberately excluded from `RESOLVE_TYPES`, so it is never asked for at
+all. Unlike the other six it needs a code change as well as a registration.
 
 What it would gain, measured on the owner's real chart:
 
@@ -72,9 +76,18 @@ What it would cost:
    ever received this client id without a named IT contact. Epic's form labels
    each API — trust those labels, not this list.
 
-**No code change is needed.** All seven are already in `WANTED`; they are
-requested every run and skipped on 403. If a registration ever covers them,
-they start flowing with no edit.
+**No code change is needed for six of the seven.** `Coverage`,
+`FamilyMemberHistory`, `ImagingStudy`, `ImmunizationRecommendation`,
+`Appointment` and `QuestionnaireResponse` are already in `WANTED`; they are
+requested every run and skipped on 403, so a registration that covers them
+starts them flowing with no edit.
+
+**`Specimen` is the exception, and it is the one worth having.** Registering it
+is not enough: add it to `WANTED` to search it, and to `RESOLVE_TYPES` to chase
+the 158 dangling references that are the actual prize — `_resolve_round()` only
+walks the types listed there. Both currently omit it on the grounds that
+Stanford 403s it (see the comment above `RESOLVE_TYPES` in `epic_export.py`),
+which is true today and stops being true the moment a registration covers it.
 
 **What this would *not* fix.** The 403s on 30 `Encounter`, 19 `ServiceRequest`
 and 4 `Observation` ids are *not* a registration gap — those three types are
@@ -157,11 +170,13 @@ boilerplate "may not contain the entire record" warning. These are recorded as
 
 **These APIs are not on the current registration** (403 on every run):
 `Coverage`, `FamilyMemberHistory`, `ImagingStudy`, `ImmunizationRecommendation`,
-`Appointment`, `QuestionnaireResponse`, `Specimen`. They are listed in `WANTED`
-anyway — an unregistered type is logged and skipped, and what the client asks
-for does **not** affect auto-distribution eligibility. Only the registration
-does. Adding them requires a second app registration, and the USCDI-only rule
-still applies to whatever is chosen.
+`Appointment`, `QuestionnaireResponse`. They are listed in `WANTED` anyway — an
+unregistered type is logged and skipped, and what the client asks for does
+**not** affect auto-distribution eligibility. Only the registration does.
+Adding them requires a second app registration, and the USCDI-only rule still
+applies to whatever is chosen. `Specimen` is unregistered too but is absent
+from both `WANTED` and `RESOLVE_TYPES`, so it never appears in the 403s — see
+the future-enhancement section above.
 
 **`Binary` must be in the app's registered API list.** Clinical note narrative
 lives in `DocumentReference` attachments that resolve through `Binary`. Without
