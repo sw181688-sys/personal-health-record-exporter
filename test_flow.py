@@ -356,6 +356,15 @@ def main() -> int:
             b = b'{"resourceType":"Binary","contentType":"text/plain","data":""}'
             self.send_response(200); self.send_header("Content-Length", str(len(b)))
             self.end_headers(); self.wfile.write(b)
+
+        def do_POST(self):  # noqa: N802
+            # Records what a 307 from the token endpoint would have handed
+            # over: the whole form body, credentials and all.
+            n = int(self.headers.get("Content-Length", 0))
+            redirected["post_body"] = self.rfile.read(n).decode("utf-8", "replace")
+            self.send_response(200); self.send_header("Content-Length", "2")
+            self.end_headers(); self.wfile.write(b"{}")
+
         def log_message(self, *a): pass
 
     threading.Thread(
@@ -408,7 +417,48 @@ def main() -> int:
     xss = (ev / "record.html").read_text(encoding="utf-8")
     check("patient name escaped in <title>", "<script>alert(1)" not in xss)
 
-    print("\n9. CLI entrypoint works")
+    print("\n9. the https callback certificate")
+    # The default redirect URI is https, so _self_signed_cert() runs on every
+    # real login — but every test above uses an http redirect, leaving the
+    # whole TLS branch dead in CI. A break here (a cryptography API change, a
+    # bad file mode) fails login outright, with nothing to catch it first.
+    import ssl as _ssl
+    cd = Path("/tmp/record-test-cert"); shutil.rmtree(cd, ignore_errors=True)
+    cd.mkdir(parents=True)
+    crt, key = ex._self_signed_cert(cd)
+    check("cert and key written", crt.exists() and key.exists())
+    try:
+        _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER).load_cert_chain(
+            certfile=str(crt), keyfile=str(key))
+        loadable = True
+    except Exception as e:  # noqa: BLE001
+        loadable = False
+        print(f"      load_cert_chain: {type(e).__name__}: {e}")
+    # Existence is not the property that matters: the file has to be a usable
+    # keypair, which is what os.open()+fdopen has to produce byte for byte.
+    check("keypair loads into a TLS context", loadable)
+    check("second call reuses rather than regenerating",
+          ex._self_signed_cert(cd) == (crt, key))
+
+    print("\n10. the token endpoint cannot forward credentials on a redirect")
+    # requests strips the Authorization header across hosts, but never a form
+    # body — and a 307 preserves both method and body. The token POST carries
+    # the authorization code and the PKCE verifier, so following one would
+    # hand both to the redirect target. allow_redirects=False is the guard;
+    # this pins it. RedirectTarget from section 7 is already listening.
+    redirected.pop("post_body", None)
+    a5 = _c.deepcopy(args); a5.out = "/tmp/record-test-tok"
+    a5.fhir_base = mock_epic.BASE + "-redirect-token"
+    shutil.rmtree(a5.out, ignore_errors=True)
+    try:
+        ex.do_login(a5); exited = False
+    except SystemExit:
+        exited = True
+    check("login fails rather than following the token redirect", exited)
+    check("authorization code and PKCE verifier never reached the target",
+          "post_body" not in redirected, str(redirected.get("post_body"))[:80])
+
+    print("\n11. CLI entrypoint works")
     p = subprocess.run([sys.executable, str(Path(__file__).parent / "epic_export.py"),
                         "--help"], capture_output=True, text=True)
     check("--help exits 0", p.returncode == 0)
